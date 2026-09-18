@@ -252,6 +252,18 @@ private class PlatformPlugin : Plugin {
             FILE_TYPE_EP,
             FileTypeMapping(listOf(".md", ".markdown"), LanguageId("markdown"))
         )
+        // C/C++/C#: recognized as their own file types so they are not misparsed as Java. No
+        // editor backend registered yet (no parser/completion/diagnostics) and no build-side
+        // compiler wired in -- these edit as plain text with C-family syntax colors, the same
+        // way .aidl/.pro are handled in AndroidSupportPlugin below. Real compilation support
+        // (an on-device NDK/Clang toolchain for C/C++, and a runtime for C#) is separate,
+        // larger follow-up work -- see NATIVE_LANG_SUPPORT.md.
+        reg.register(FILE_TYPE_EP, FileTypeMapping(listOf(".c", ".h"), LanguageId("c")))
+        reg.register(
+            FILE_TYPE_EP,
+            FileTypeMapping(listOf(".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"), LanguageId("cpp"))
+        )
+        reg.register(FILE_TYPE_EP, FileTypeMapping(listOf(".cs"), LanguageId("csharp")))
     }
 }
 
