@@ -1,62 +1,49 @@
-# Suporte a C, C++ e C# no CodeAssist — estado final desta sessão
+# Suporte a C/C++ SEM segundo APK — plano concreto (não executado ainda)
 
-Este arquivo documenta o estado real do fork `andrelaerth44-pixel/Code-assist-c-e-c-` (fork completo de
-`tyron12233/CodeAssist`) para C/C++/C#, e exatamente o que falta para compilar de verdade.
+Investiguei o pedido de trazer o NDK para dentro do próprio `:ide-android`, sem precisar instalar o
+`samples/ndk-plugin` como app separado. Resultado: **é arquiteturalmente possível e bem definido** — não é
+mais uma parede de permissão, é engenharia real de framework, com risco real de quebrar o carregamento de
+plugins inteiro se eu errar algo sem poder compilar para checar. Por isso não apliquei ainda; deixo o plano
+exato abaixo.
 
-## 1. Editor (feito, já commitado)
+## Por que hoje não funciona simplesmente movendo o código
 
-`app/ide-core/.../plugins/NativeLanguagesUiPlugin.kt` + entrada em `BuiltInPlugins.kt`:
-- `.c/.h/.cpp/.cc/.cxx/.hh/.hpp/.hxx/.cs` reconhecidos como suas próprias linguagens (não caem mais como
-  Java quebrado)
-- Coloração de sintaxe real via `EditorLanguageProfile`/`SyntaxFamily.C_FAMILY` (keywords, comentários,
-  diretivas de pré-processador `#include`/`#define`)
-- Plugin não-essencial, ativável/desativável em Settings → Plugins
+`PluginRegistration.nativeLibrary()`/`nativeLibraryDir` resolvem para o diretório nativo do PACOTE
+instalado — só que hoje só são preenchidos para um plugin instalado como APK separado.
+`plugins/plugin-impl/.../PluginRegistrationImpl.kt` documenta isso explicitamente: **"null for a built-in"**.
+Se eu só movesse `NdkPlugin`/`NdkToolchain` para `ide-core` sem mais nada, `reg.nativeLibrary()` sempre
+voltaria null e o toolchain reportaria "no toolchain for this device's ABI" em TODO dispositivo — pior que
+não ter feito nada, porque pareceria pronto e nunca funcionaria.
 
-Isso é só reconhecimento + coloração. Não compila nada sozinho.
+**Mas** o comentário em `PluginManager.kt` sobre esse mapa diz: *"Empty for built-ins (their libraries are
+the IDE's own)"* — ou seja, a intenção original já reconhece que as bibliotecas de um built-in SÃO as do
+próprio app; simplesmente nenhum built-in tinha precisado disso até agora. Não é uma restrição do Android
+(o APK do `:ide-android` tem seu próprio `nativeLibraryDir` de instalação, igualmente válido para `exec()`),
+é só um caminho do framework que nunca foi preenchido.
 
-## 2. Compilação de verdade (já existe no upstream, já está no seu fork)
+## O plano, arquivo por arquivo
 
-**Achado importante:** o mecanismo real para "Kotlin/Java na UI + C/C++ no motor, no MESMO app" já existe,
-pronto, em `samples/ndk-plugin` (já presente no seu fork por ser um fork de verdade, confirmado em
-`settings.gradle.kts`):
+1. **`app/ide-android`** (build.gradle.kts): copiar a lógica de empacotamento de `samples/ndk-plugin/
+   build.gradle.kts` (`packToolchainAssets`, `sourceSets["main"].jniLibs.srcDir(...)`, `assets.srcDir(...)`)
+   — as bytes do toolchain passam a entrar no APK principal em vez do plugin separado.
+2. **Contexto do app até o `ApplicationEnvironment`**: em algum ponto de inicialização do `:ide-android`
+   (Application/Activity) já deve existir um `Context`; falta passar
+   `context.applicationInfo.nativeLibraryDir` para baixo até onde o `PluginManager` é construído.
+3. **`app/ide-core/.../ApplicationEnvironment.kt`**: ao montar o `PluginManager`, incluir no mapa
+   `nativeLibraryDirs` a entrada `"native-languages-ndk" to hostNativeLibraryDir` (o mesmo diretório do host,
+   não um path de plugin instalado).
+4. **`BuiltInPlugins.kt`**: registrar `NdkPlugin()`/`NdkUiPlugin` (copiados de `samples/ndk-plugin`, mesmo
+   pacote `dev.codeassist.ndk`) como um `BuiltInPlugin` com esse id.
+5. **Galeria "Create Project"**: nada a fazer aqui além do passo 4 — `NativeCppTemplate`/
+   `NativeActivityTemplate` já se registram via `ProjectTemplateExtensionPoint` dentro do próprio
+   `NdkPlugin.register()`, e a galeria já lê esse extension point dinamicamente (confirmado em
+   `docs/custom-language-support.md`). Nenhuma tela nova para escrever.
 
-- `NdkFacet` — tabela `[ndk]` no `module.toml` de um módulo Android Kotlin/Java normal (pastas de fonte,
-  ABIs, padrão C/C++)
-- `NdkBuildPlugin` — um `BuildPlugin` real que compila e linka o `.so` e mescla direto no APK do módulo,
-  "wired ahead of the Android packaging merge"
-- `NdkDiagnosticProvider` / `NdkCompletionContributor` — diagnósticos e completion reais do clang no editor
-- `NativeCppTemplate` / `NativeActivityTemplate` — templates de projeto 100% C++ (aparecem sozinhos na
-  galeria Create Project assim que o plugin está ativo, via `ProjectTemplateExtensionPoint` — não precisa de
-  UI nova)
+## Por que não apliquei isso ainda, nesta sessão
 
-Ou seja: o fluxo "app Kotlin + engine C++" que você descreveu (Canvas de desenho, pincéis em C++, UI em
-Kotlin) é literalmente o caso de uso para o qual esse plugin foi desenhado.
-
-## 3. O que falta, na ordem real
-
-1. **Os binários do compilador não existem ainda** (nem no seu fork, nem no oficial). `tools/ndk-toolchain/
-   build-llvm-android.sh` compila um clang+lld+llvm-binutils que RODAM em Android arm64 (não é download —
-   ver `tools/ndk-toolchain/README.md`: o NDK do Google só tem clang de desktop). Precisa de cmake, ninja,
-   curl, ~13 GB livres. É pesado (LLVM inteiro, ainda que só o alvo AArch64) — pode levar horas.
-2. **Um segundo APK precisa ser compilado**: `samples/ndk-plugin` é de propósito um app Android separado
-   (`dev.codeassist.ndk`) — não faz parte do APK principal do CodeAssist, para não inchar o app de quem não
-   usa C/C++. Instalar os dois (CodeAssist + esse plugin) é o fluxo esperado, não um problema.
-
-## 4. O que já está pronto para os dois passos acima
-
-`READY_ndk-plugin-apk.yml` (raiz do repositório) — um workflow COMPLETO com os dois jobs (build do
-toolchain via `build-llvm-android.sh`, depois `:samples:ndk-plugin:assembleDebug` já apontado para o output
-do primeiro job). Não pude colocá-lo em `.github/workflows/` nesta sessão porque o GitHub App conectado
-aqui não tem o escopo `workflows` (testado e confirmado três vezes ao longo desta conversa: fork bloqueado,
-edição de workflow existente bloqueada, e agora criação de workflow novo também). É literalmente um
-`git mv READY_ndk-plugin-apk.yml .github/workflows/ndk-plugin-apk.yml` (ou colar o conteúdo, abaixo da linha
-`---`, num arquivo novo pela própria interface do GitHub) e rodar pela aba Actions → Run workflow.
-
-O APK principal do CodeAssist (com o suporte de editor para C/C++/C# já embutido) continua compilando
-sozinho a cada push, sem precisar de nada disso — `.github/workflows/apk.yml` já existia e não foi tocado.
-
-## 5. C#
-
-Confirmado (busquei duas vezes no upstream): zero menção a Mono/.NET no projeto inteiro. Fora de escopo por
-decisão sua também ("pode deixar de fora o C Sharp"). O reconhecimento de arquivo + coloração de sintaxe
-para `.cs` continuam ativos (item 1), só não há — nem há planos de haver — compilação real.
+Os passos 1 a 3 alteram código central (`PluginManager`, `ApplicationEnvironment`, o `build.gradle.kts` do
+app principal) sem eu conseguir compilar para checar — diferente dos commits anteriores desta sessão, que
+seguiam um padrão já existente e comprovado linha por linha (`.aidl`/`.pro`/`.md`, `AgentPlugin`/`VcsPlugin`).
+Aqui não há precedente exato para copiar; um erro de assinatura de função quebraria o carregamento de
+plugins do app inteiro, não só o NDK. É o tipo de mudança que vale mais a pena fazer com um compilador do
+lado — Claude Code local resolve isso sem essa limitação.
