@@ -1,0 +1,113 @@
+# READY TO USE — this file is NOT active yet.
+#
+# I could not write into .github/workflows/ from this session (the connected GitHub App lacks the
+# `workflows` permission scope -- confirmed, tested twice). Everything below is a real, complete workflow;
+# moving it is the only remaining step:
+#
+#   mkdir -p .github/workflows
+#   git mv READY_ndk-plugin-apk.yml .github/workflows/ndk-plugin-apk.yml
+#   git commit -m "Enable NDK plugin APK build" && git push
+#
+# (or just paste this file's content, below the --- line, into a new file at
+# .github/workflows/ndk-plugin-apk.yml through the GitHub web UI -- "Add file" -> "Create new file").
+#
+# What it does, in two jobs:
+#   1. build-toolchain: runs tools/ndk-toolchain/build-llvm-android.sh, which cross-compiles a clang+lld+
+#      llvm-binutils that RUN ON an Android arm64 device (see tools/ndk-toolchain/README.md for why this is
+#      a build and not a download). This is the heavy, uncertain part: the script itself says it needs
+#      cmake, ninja, curl, and ~13 GB free disk. A GitHub-hosted ubuntu-latest runner reports similar free
+#      space but with real overhead already consumed, so a disk-cleanup step is included; even so this may
+#      need tuning (a smaller LLVM target list, a larger runner) if it runs out of space or exceeds the job
+#      time limit. Manual trigger only (workflow_dispatch) -- deliberately never on every push, since a full
+#      LLVM build is multiple hours.
+#   2. build-ndk-plugin-apk: needs the first job, points Gradle at its output
+#      (-Pndk.toolchain.dir=...), and builds `:samples:ndk-plugin:assembleDebug` -- the SEPARATE installable
+#      plugin APK (dev.codeassist.ndk) that carries the compiler. This is what actually needs to be
+#      installed alongside the main CodeAssist APK for on-device C/C++ compilation to work.
+#
+# Run it from the Actions tab (Run workflow) once it's in .github/workflows/. Expect the first job to take
+# a long time; if it fails on disk space, the LLVM_TARGETS_TO_BUILD / disk-cleanup steps below are the first
+# things to adjust.
+#
+# ---
+
+name: NDK Plugin APK
+
+on:
+  workflow_dispatch:
+
+env:
+  JAVA_VERSION: "25"
+
+jobs:
+  build-toolchain:
+    name: Build on-device LLVM toolchain
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      # LLVM needs real disk headroom; GitHub's runners report ~14 GB free but a lot of that is already
+      # spoken for. Removing preinstalled toolchains this build doesn't use buys back several GB.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force || true
+          df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build curl
+
+      - name: Run build-llvm-android.sh
+        working-directory: tools/ndk-toolchain
+        run: |
+          chmod +x build-llvm-android.sh
+          ./build-llvm-android.sh
+
+      - name: Upload toolchain output
+        uses: actions/upload-artifact@v4
+        with:
+          name: ndk-toolchain-out
+          path: tools/ndk-toolchain/build/out
+          if-no-files-found: error
+          retention-days: 90
+
+  build-ndk-plugin-apk:
+    name: assembleDebug (:samples:ndk-plugin)
+    needs: build-toolchain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download toolchain output
+        uses: actions/download-artifact@v4
+        with:
+          name: ndk-toolchain-out
+          path: tools/ndk-toolchain/build/out
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-36 platforms;android-36.1 build-tools;36.0.0"
+
+      - name: Build debug APK
+        run: ./gradlew :samples:ndk-plugin:assembleDebug --console=plain --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ndk-plugin-debug-apk
+          path: samples/ndk-plugin/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30
