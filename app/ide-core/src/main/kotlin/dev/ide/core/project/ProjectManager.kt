@@ -155,6 +155,12 @@ class ProjectManager private constructor(
     private val pluginSources: List<dev.ide.plugin.external.PluginSource> = emptyList(),
     /** The running IDE's version, checked against an installed plugin's `minHostVersion`. */
     private val hostVersion: String? = null,
+    /** The running app's own native-library directory (from :ide-android's `Context.applicationInfo.
+     *  nativeLibraryDir` — the same one already used for aapt2/zipalign), passed through to
+     *  [ApplicationEnvironment.hostNativeLibraryDir] so a built-in flagged
+     *  `usesHostNativeLibrary` (e.g. the NDK plugin) can ship and exec its own native tool. Null on desktop
+     *  and in tests. */
+    private val hostNativeLibraryDir: Path? = null,
 ) {
     init {
         Files.createDirectories(projectsRoot)
@@ -174,6 +180,7 @@ class ProjectManager private constructor(
         // Under the app's own home rather than a cache dir: a plugin's data is its state, not something the
         // IDE may drop to reclaim space, and it is swept up by the same backup the projects are.
         pluginDataRoot = homeDir.resolve("plugin-data"),
+        hostNativeLibraryDir = hostNativeLibraryDir,
         // Read lazily: this manager's preference file is opened on demand, so handing over the reader during
         // construction is safe and the keymap sees a rebinding the moment it is saved.
         preferences = { key -> preference(key) },
@@ -880,6 +887,10 @@ class ProjectManager private constructor(
             pluginSources: List<dev.ide.plugin.external.PluginSource> = emptyList(),
             /** The running IDE's version, checked against an installed plugin's `minHostVersion`. */
             hostVersion: String? = null,
+            /** The running app's own `Context.applicationInfo.nativeLibraryDir` (`:ide-android` already
+             *  computes this for aapt2/zipalign), threaded to [ApplicationEnvironment.hostNativeLibraryDir]
+             *  so a built-in flagged `usesHostNativeLibrary` can ship its own native tool. */
+            hostNativeLibraryDir: Path? = null,
         ): ProjectManager {
 
 
@@ -912,6 +923,7 @@ class ProjectManager private constructor(
                 kotlinCompiler = kotlinCompiler,
                 pluginSources = pluginSources,
                 hostVersion = hostVersion,
+                hostNativeLibraryDir = hostNativeLibraryDir,
             )
         }
     }
