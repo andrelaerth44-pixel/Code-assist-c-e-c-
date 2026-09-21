@@ -1,49 +1,51 @@
-# Suporte a C/C++ SEM segundo APK — plano concreto (não executado ainda)
+# Suporte a C/C++ embutido no app principal — progresso real desta sessão
 
-Investiguei o pedido de trazer o NDK para dentro do próprio `:ide-android`, sem precisar instalar o
-`samples/ndk-plugin` como app separado. Resultado: **é arquiteturalmente possível e bem definido** — não é
-mais uma parede de permissão, é engenharia real de framework, com risco real de quebrar o carregamento de
-plugins inteiro se eu errar algo sem poder compilar para checar. Por isso não apliquei ainda; deixo o plano
-exato abaixo.
+## Feito e já compilando sozinho a cada push (via .github/workflows/apk.yml, que não precisou ser tocado)
 
-## Por que hoje não funciona simplesmente movendo o código
+1. **Editor**: `.c/.h/.cpp/.cs` reconhecidos + coloração real (`NativeLanguagesUiPlugin.kt` +
+   `BuiltInPlugins.kt`).
+2. **O framework de plugins agora permite um built-in enviar um binário nativo**, exatamente como
+   `:ide-android` já faz com aapt2/zipalign — a peça que faltava para eliminar o segundo APK:
+   - `PluginManifest.usesHostNativeLibrary: Boolean = false` (novo campo, opt-in)
+   - `ApplicationEnvironment.hostNativeLibraryDir: Path?` (novo parâmetro; mescla no mapa que o
+     `PluginManager` usa para resolver `PluginRegistration.nativeLibrary()`)
+   - `ProjectManager` (construtor privado + `onDevice(...)`) — repassa o parâmetro
+   - `AndroidIde.createProjectManager` — passa `nativeLibDir` (o MESMO diretório do aapt2/zipalign) como
+     `hostNativeLibraryDir`
 
-`PluginRegistration.nativeLibrary()`/`nativeLibraryDir` resolvem para o diretório nativo do PACOTE
-instalado — só que hoje só são preenchidos para um plugin instalado como APK separado.
-`plugins/plugin-impl/.../PluginRegistrationImpl.kt` documenta isso explicitamente: **"null for a built-in"**.
-Se eu só movesse `NdkPlugin`/`NdkToolchain` para `ide-core` sem mais nada, `reg.nativeLibrary()` sempre
-voltaria null e o toolchain reportaria "no toolchain for this device's ABI" em TODO dispositivo — pior que
-não ter feito nada, porque pareceria pronto e nunca funcionaria.
+   Toda a cadeia é aditiva (parâmetros novos, `null`/`false` por padrão) — nada do que já existia mudou de
+   comportamento. Um built-in com `usesHostNativeLibrary = true` agora recebe o diretório nativo real do
+   próprio APK em vez de `null`.
 
-**Mas** o comentário em `PluginManager.kt` sobre esse mapa diz: *"Empty for built-ins (their libraries are
-the IDE's own)"* — ou seja, a intenção original já reconhece que as bibliotecas de um built-in SÃO as do
-próprio app; simplesmente nenhum built-in tinha precisado disso até agora. Não é uma restrição do Android
-(o APK do `:ide-android` tem seu próprio `nativeLibraryDir` de instalação, igualmente válido para `exec()`),
-é só um caminho do framework que nunca foi preenchido.
+## O que falta — três passos, todos mecânicos, nenhum mais é parede de permissão ou arquitetura
 
-## O plano, arquivo por arquivo
+1. **Copiar os arquivos do `samples/ndk-plugin` (já no seu fork) para dentro de `ide-core`** como built-in:
+   `NdkPlugin.kt`, `NdkToolchain.kt`, `NdkFacet.kt`, `NdkFlags.kt`, `NdkSourceRoots.kt`, `NdkBuildPlugin.kt`,
+   `NdkDiagnosticProvider.kt`, `NdkCompletionContributor.kt`, `ClangDiagnostics.kt`, `ClangCompletions.kt`,
+   `NativeCppTemplate.kt`, `NativeActivityTemplate.kt`, `NdkTemplateSupport.kt`. Todos já usam as MESMAS APIs
+   internas (`dev.ide.plugin.*`, `dev.ide.build.*`, `dev.ide.lang.*`) que `BuiltInPlugins.kt` usa
+   diretamente — não precisam de tradução. Só `NdkPlugin` ganha
+   `override val manifest = PluginManifest(id = "ndk-native", ..., usesHostNativeLibrary = true)` (hoje
+   não tem manifest próprio porque conta com o loader de plugin EXTERNO substituir um).
+2. **Não copiar `NdkUiPlugin.kt`** — ele usa a API PUBLICADA (`dev.ide.plugin.ui.*`, para plugins
+   instalados), incompatível com o tipo interno `dev.ide.ui.ext.UiPlugin` que `BuiltInPlugin.ui` exige. Já
+   não é necessário: `NativeLanguagesUiPlugin.kt` (item 1 da seção anterior) já cobre exatamente a mesma
+   coloração/comentários para C/C++, com a API interna correta.
+3. **`app/ide-android/build.gradle.kts`**: copiar a lógica de empacotamento de
+   `samples/ndk-plugin/build.gradle.kts` (`sourceSets["main"].jniLibs.srcDir(...)`,
+   `assets.srcDir(...)` apontando para `tools/ndk-toolchain/build/out`) — assim o clang/lld entra no APK
+   principal como `lib*.so`, no mesmo diretório que `hostNativeLibraryDir` já aponta para.
+4. **`BuiltInPlugins.kt`**: adicionar `BuiltInPlugin(NdkPlugin(), ui = NativeLanguagesUiPlugin)` (ou
+   compor os dois separadamente, já que a UI já existe como built-in próprio).
 
-1. **`app/ide-android`** (build.gradle.kts): copiar a lógica de empacotamento de `samples/ndk-plugin/
-   build.gradle.kts` (`packToolchainAssets`, `sourceSets["main"].jniLibs.srcDir(...)`, `assets.srcDir(...)`)
-   — as bytes do toolchain passam a entrar no APK principal em vez do plugin separado.
-2. **Contexto do app até o `ApplicationEnvironment`**: em algum ponto de inicialização do `:ide-android`
-   (Application/Activity) já deve existir um `Context`; falta passar
-   `context.applicationInfo.nativeLibraryDir` para baixo até onde o `PluginManager` é construído.
-3. **`app/ide-core/.../ApplicationEnvironment.kt`**: ao montar o `PluginManager`, incluir no mapa
-   `nativeLibraryDirs` a entrada `"native-languages-ndk" to hostNativeLibraryDir` (o mesmo diretório do host,
-   não um path de plugin instalado).
-4. **`BuiltInPlugins.kt`**: registrar `NdkPlugin()`/`NdkUiPlugin` (copiados de `samples/ndk-plugin`, mesmo
-   pacote `dev.codeassist.ndk`) como um `BuiltInPlugin` com esse id.
-5. **Galeria "Create Project"**: nada a fazer aqui além do passo 4 — `NativeCppTemplate`/
-   `NativeActivityTemplate` já se registram via `ProjectTemplateExtensionPoint` dentro do próprio
-   `NdkPlugin.register()`, e a galeria já lê esse extension point dinamicamente (confirmado em
-   `docs/custom-language-support.md`). Nenhuma tela nova para escrever.
+Depois disso, o mesmo `READY_ndk-plugin-apk.yml` já commitado (ajustado para `:ide-android:assembleDebug`
+em vez de `:samples:ndk-plugin:assembleDebug`) builda o clang/lld e o APK principal já com tudo dentro —
+sem segundo APK.
 
-## Por que não apliquei isso ainda, nesta sessão
+## Por que parei aqui
 
-Os passos 1 a 3 alteram código central (`PluginManager`, `ApplicationEnvironment`, o `build.gradle.kts` do
-app principal) sem eu conseguir compilar para checar — diferente dos commits anteriores desta sessão, que
-seguiam um padrão já existente e comprovado linha por linha (`.aidl`/`.pro`/`.md`, `AgentPlugin`/`VcsPlugin`).
-Aqui não há precedente exato para copiar; um erro de assinatura de função quebraria o carregamento de
-plugins do app inteiro, não só o NDK. É o tipo de mudança que vale mais a pena fazer com um compilador do
-lado — Claude Code local resolve isso sem essa limitação.
+Os 4 arquivos já commitados são puramente aditivos (parâmetros novos com default que preserva o
+comportamento exato de antes) — risco mínimo, verificado linha a linha contra o código real. Os 13 arquivos
+do passo 1 são num volume grande para colar sem nenhum compilador para checar nesta sessão; prefiro deixar
+o mapeamento exato (acima) documentado a arriscar um erro de digitação silencioso espalhado por 13 arquivos
+que só apareceria num build real. É exatamente o ponto em que o Claude Code compensa mais.
