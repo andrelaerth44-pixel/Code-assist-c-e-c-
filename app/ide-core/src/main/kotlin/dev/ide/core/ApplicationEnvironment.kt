@@ -81,6 +81,17 @@ class ApplicationEnvironment(
      */
     val pluginDataRoot: Path? = null,
     /**
+     * The running app's OWN native-library directory (`Context.applicationInfo.nativeLibraryDir` on
+     * Android), so a BUILT-IN plugin can ship a `lib*.so` executable the same way an installed plugin does.
+     * `:ide-android` already relies on this exact mechanism for its aapt2/zipalign prebuilts (see
+     * `AndroidIde.createProjectManager`'s `nativeLibDir`); this is that same directory, reused for a
+     * built-in that packages its own native tool (e.g. the on-device NDK/Clang toolchain) instead of a
+     * separately-installed plugin app. Null on desktop and in tests, where a built-in ships no native code.
+     * Merged into [PluginManager]'s `nativeLibraryDirs` map below, keyed by the built-in's own plugin id, so
+     * `PluginRegistration.nativeLibrary()` resolves for it exactly as it would for an installed plugin.
+     */
+    val hostNativeLibraryDir: Path? = null,
+    /**
      * Reads an app-global preference, for the built-ins that need one at load. The keymap is the reason it
      * exists: a user's rebinding has to be in force from the first key press, and the preference store lives
      * on the host's [dev.ide.core.project.ProjectManager], which is built around this environment rather than
@@ -227,11 +238,21 @@ class ApplicationEnvironment(
         }
 
         // Only the plugins that actually load, so a rejected or disabled plugin's directory is never handed
-        // out, and only the ones whose source unpacked native libraries at all (no built-in does).
+        // out, and only the ones whose source unpacked native libraries at all (no built-in did, before
+        // hostNativeLibraryDir: see its doc).
         val nativeLibraryDirs = discovered
             .filter { it.manifest.id in external }
             .mapNotNull { d -> d.nativeLibraryDir?.let { d.manifest.id to it } }
-            .toMap()
+            .toMap() +
+            // A built-in that packages its own native tool (see hostNativeLibraryDir's doc) gets the SAME
+            // treatment as an installed plugin: its own entry in this map, under its own plugin id, pointing
+            // at the app's real (installer-unpacked) native-library directory -- not a per-plugin one, since a
+            // built-in has none of its own; it IS the host app.
+            (hostNativeLibraryDir?.let { dir ->
+                enabledBuiltIns
+                    .filter { it.engine.manifest.usesHostNativeLibrary }
+                    .associate { it.engine.manifest.id to dir }
+            } ?: emptyMap())
         pluginManager = PluginManager(
             platform.extensions, platform.messageBus, hostVersion, container, pluginDataRoot, nativeLibraryDirs,
         )
