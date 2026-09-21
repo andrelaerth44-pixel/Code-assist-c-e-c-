@@ -375,6 +375,10 @@ object AndroidIde {
             // read-only APK the system already installed and optimised.
             pluginSources = listOf(ApkPluginSource(context)),
             hostVersion = BuildConfig.VERSION_NAME,
+            // Same directory as `nativeLibDir` above (aapt2/zipalign): the built-in NDK plugin (flagged
+            // `usesHostNativeLibrary`) reads its own clang/lld out of here too, once bundled into this APK's
+            // own lib*.so the same way aapt2 already is. See ApplicationEnvironment.hostNativeLibraryDir.
+            hostNativeLibraryDir = nativeLibDir,
         ).also { managerRef.set(it) }
     }
 
