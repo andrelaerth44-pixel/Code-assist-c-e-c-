@@ -52,7 +52,7 @@ const val PLUGIN_API_VERSION: Int = 3
  *
  * `2.0.0` is a major bump because it is the first change that can stop an existing plugin from *compiling*.
  * It opened the project model's closed vocabularies (see [PLUGIN_API_VERSION]) so that a plugin for a
- * language laid out unlike a JVM module can name its own content roles, platform, packaging, language level,
+ * language laid out unlike a JVM module can name its own content roots, platform, packaging, language level,
  * dependency scopes and classpath-entry kinds; the constants and `values()`/`valueOf` survive, but an
  * exhaustive `when` over one of them now needs an `else`. It also:
  *
@@ -266,6 +266,14 @@ const val PLUGIN_API_VERSION: Int = 3
  *    means and nothing else about Gradle; its only options were to replace the Gradle importer, or to re-read
  *    the build files behind its back and keep a model the next Sync silently invalidates. A contributor runs
  *    on the first import and on every Sync, so the two cannot disagree.
+ *
+ * `2.10.1` (this fork) added [PluginManifest.usesHostNativeLibrary]: the one thing `2.10.0`'s native-library
+ * support still assumed was a SEPARATELY-INSTALLED plugin package. A built-in has no package of its own to
+ * unpack a native library into, so [dev.ide.plugin.PluginRegistration.nativeLibraryDir] answered null for one
+ * unconditionally (see that property's doc) -- correct for every built-in that came before, wrong for one
+ * that ships a native tool the way `:ide-android` already ships aapt2/zipalign as `lib*.so` in its OWN APK.
+ * A built-in that sets this flag is handed the HOST app's own native-library directory instead of null; see
+ * [dev.ide.core.ApplicationEnvironment.hostNativeLibraryDir] for the host-side half.
  */
 const val PLUGIN_SPI_VERSION: String = "2.10.0"
 
@@ -294,6 +302,15 @@ data class PluginManifest(
      *  the default language backend + resolution fallback, the engine's core scoped services). Essentials and
      *  everything they transitively depend on stay loaded regardless of the user's disabled set. */
     val essential: Boolean = false,
+    /**
+     * BUILT-IN ONLY (ignored for an installed plugin, which always uses its own package's native-library
+     * directory when it has one). When true, this built-in's [PluginRegistration.nativeLibraryDir] resolves
+     * to the running app's own `lib*.so` directory instead of null, so it can ship and `exec()` a native
+     * tool the same way `:ide-android` already does for aapt2/zipalign. Defaults to false: every built-in
+     * before this one packages no native code, and stays that way unless it opts in explicitly. See
+     * [dev.ide.core.ApplicationEnvironment.hostNativeLibraryDir].
+     */
+    val usesHostNativeLibrary: Boolean = false,
 
     // Inert until the external/dex tier (parsed + carried now, enforced by that tier's loader):
     val entryPoints: List<String> = emptyList(),
