@@ -1,5 +1,6 @@
 package dev.ide.core.plugins
 
+import dev.codeassist.ndk.NdkPlugin
 import dev.ide.agent.ui.AgentUiPlugin
 import dev.ide.analysis.ACTION_PROVIDER_EP
 import dev.ide.analysis.ANALYZER_EP
@@ -209,6 +210,14 @@ object BuiltInPlugins {
         // C/C++/C#: file-type recognition + C-family syntax coloring only (no parser, no completion, no
         // compiler yet). See NativeLanguagesUiPlugin.kt and NATIVE_LANG_SUPPORT.md.
         BuiltInPlugin(NativeLanguagesPlugin(), ui = NativeLanguagesUiPlugin),
+        // C/C++ NDK: the real compiler. Ported from samples/ndk-plugin (upstream's installable plugin app)
+        // into a built-in -- its manifest sets usesHostNativeLibrary = true, so PluginRegistration.
+        // nativeLibrary() resolves against THIS app's own lib*.so (see ApplicationEnvironment.
+        // hostNativeLibraryDir) instead of a separate installed package's. No UI facet: NdkUiPlugin (the
+        // original's Compose coloring) was written against the published plugin-ui-api, a different type
+        // than a built-in's UiPlugin -- NativeLanguagesUiPlugin above already covers the same C/C++ coloring
+        // with the correct internal type, so nothing is missing.
+        BuiltInPlugin(NdkPlugin()),
         BuiltInPlugin(JavaSupportPlugin()),
         BuiltInPlugin(KotlinSupportPlugin()),
         BuiltInPlugin(KspSupportPlugin(env)),
