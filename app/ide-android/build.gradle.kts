@@ -483,6 +483,14 @@ android {
     sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("compose-drawables-asset").get().asFile)
     sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("r8-dex-asset").get().asFile)
     sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("applog-runtime-asset").get().asFile)
+    // The on-device NDK toolchain (clang/lld as libllvmtools.so/libld-gnu-lld.so, plus headers/link
+    // libraries in toolchain.zip): the same two-part packaging as the samples/ndk-plugin app this was
+    // ported from (see ndkToolchainLibs/packToolchainAssets below), now landing in THIS app's own APK
+    // instead of a separate one, since NdkPlugin (app/ide-core) registers with usesHostNativeLibrary =
+    // true. jniLibs.useLegacyPackaging (in packaging{} below) already applies to every jniLibs source, not
+    // just aapt2's, so no change needed there.
+    sourceSets.getByName("main").jniLibs.srcDir(ndkToolchainLibs)
+    sourceSets.getByName("main").assets.srcDir(ndkToolchainAssetsDir)
     sourceSets.getByName("androidTest").assets.srcDir(layout.buildDirectory.dir("vm-spike-asset").get().asFile)
     sourceSets.getByName("androidTest").assets.srcDir(layout.buildDirectory.dir("moshi-libs-asset").get().asFile)
 
@@ -630,7 +638,8 @@ android {
         // The bundled aapt2 is a statically-linked Android executable shipped as libaapt2.so. Force the
         // legacy packaging that EXTRACTS it into nativeLibraryDir at install (the only dir ART lets you
         // exec from), and keep it un-stripped — it is not an ordinary shared object, so AGP's strip
-        // (when an NDK is present) would corrupt it.
+        // (when an NDK is present) would corrupt it. The same setting applies to every other jniLibs source
+        // this app has, including the NDK toolchain's libllvmtools.so/libld-gnu-lld.so below.
         jniLibs {
             useLegacyPackaging = true
             keepDebugSymbols += setOf("**/libaapt2.so")
@@ -709,10 +718,44 @@ val fetchAndroidBuildTools = tasks.register("fetchAndroidBuildTools") {
     }
 }
 
+// --- on-device NDK toolchain (C/C++) --------------------------------------------------------------
+// Same story as aapt2 above, for a full clang+lld: ART can only exec from nativeLibraryDir, so the compiler
+// ships as libllvmtools.so/libld-gnu-lld.so (see NdkToolchain in app/ide-core, ported from samples/ndk-plugin
+// -- that module's own build.gradle.kts documents the multicall-driver/linker-alias shape). The bytes are NOT
+// in this repository: tools/ndk-toolchain/build-llvm-android.sh produces them. Building without them still
+// produces a working app; NdkPlugin reports "no toolchain for this device's ABI" instead of failing.
+//
+// Headers and link libraries (too many loose files for a classloader to enumerate) go through ONE archive
+// instead, in assets/ -- see packToolchainAssets. Both halves are read back in app/ide-core's NdkToolchain
+// via PluginRegistration.nativeLibrary()/dataDir, which now resolve against THIS app's own package because
+// NdkPlugin's manifest sets usesHostNativeLibrary = true (see ApplicationEnvironment.hostNativeLibraryDir).
+val ndkToolchainOut: File =
+    (providers.gradleProperty("ndk.toolchain.dir").orNull?.let(::File)
+        ?: rootProject.file("tools/ndk-toolchain/build/out"))
+val ndkToolchainLibs: File = File(ndkToolchainOut, "jniLibs")
+val ndkToolchainSourceAssets: File = File(ndkToolchainOut, "assets/toolchain")
+val ndkToolchainAssetsDir: File = layout.buildDirectory.dir("generated/ndk-toolchain/assets").get().asFile
+
+val packToolchainAssets = tasks.register<Zip>("packToolchainAssets") {
+    description = "Pack the NDK toolchain's headers and link libraries into one assets/toolchain.zip (see the note above)."
+    from(ndkToolchainSourceAssets)
+    archiveFileName.set("toolchain.zip")
+    destinationDirectory.set(ndkToolchainAssetsDir)
+    entryCompression = ZipEntryCompression.STORED
+    onlyIf {
+        ndkToolchainSourceAssets.isDirectory.also {
+            if (!it) logger.warn(
+                "No NDK toolchain at $ndkToolchainSourceAssets -- the app will build without a C/C++ " +
+                    "compiler. Run tools/ndk-toolchain/build-llvm-android.sh first."
+            )
+        }
+    }
+}
+
 // Run before anything AGP does, so the freshly-fetched lib*.so are on disk when the native-lib merge runs,
 // and the staged kotlin-stdlib.jar asset is present when the asset merge runs.
 tasks.named("preBuild").configure {
-    dependsOn(fetchAndroidBuildTools, stripAndroidJarAsset, bundleKotlinStdlibAsset, bundleKotlincResourcesAsset, bundleComposeRuntimeAsset, bundleComposeFontsAsset, bundleComposeStringAsset, bundleAgentUiComposeStringAsset, bundleVcsUiComposeStringAsset, bundleComposeDrawablesAsset, bundleR8DexAsset, bundleAppLogRuntimeAsset, bundleVmSpikeComposeRuntimeAsset, bundleVmSpikeMaterial3Asset, bundleVmStackAsset, bundleMoshiLibsAsset, bundleAwtFixtureAsset)
+    dependsOn(fetchAndroidBuildTools, packToolchainAssets, stripAndroidJarAsset, bundleKotlinStdlibAsset, bundleKotlincResourcesAsset, bundleComposeRuntimeAsset, bundleComposeFontsAsset, bundleComposeStringAsset, bundleAgentUiComposeStringAsset, bundleVcsUiComposeStringAsset, bundleComposeDrawablesAsset, bundleR8DexAsset, bundleAppLogRuntimeAsset, bundleVmSpikeComposeRuntimeAsset, bundleVmSpikeMaterial3Asset, bundleVmStackAsset, bundleMoshiLibsAsset, bundleAwtFixtureAsset)
 }
 
 // Same Android packaging gap as the fonts above, for the i18n string resources. :ide-ui-resources'
