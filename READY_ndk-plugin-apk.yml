@@ -1,15 +1,23 @@
 # READY TO USE — this file is NOT active yet.
 #
-# I could not write into .github/workflows/ from this session (the connected GitHub App lacks the
-# `workflows` permission scope -- confirmed, tested twice). Everything below is a real, complete workflow;
-# moving it is the only remaining step:
+# The connected GitHub App lacks the `workflows` permission scope, so no session (this one included) can
+# write straight into .github/workflows/. Moving it there is the one remaining manual step:
 #
 #   mkdir -p .github/workflows
-#   git mv READY_ndk-plugin-apk.yml .github/workflows/ndk-plugin-apk.yml
-#   git commit -m "Enable NDK plugin APK build" && git push
+#   git mv READY_ndk-plugin-apk.yml .github/workflows/ndk-toolchain-apk.yml
+#   git commit -m "Enable NDK toolchain + main app build" && git push
 #
-# (or just paste this file's content, below the --- line, into a new file at
-# .github/workflows/ndk-plugin-apk.yml through the GitHub web UI -- "Add file" -> "Create new file").
+# (or, from the GitHub web/mobile UI: open this file -> the "..." menu -> "Rename file" -> change the path
+# to .github/workflows/ndk-toolchain-apk.yml -> commit directly to main.)
+#
+# UPDATED from the original version of this file: that one built `:samples:ndk-plugin:assembleDebug`, a
+# SEPARATE installable plugin APK. C/C++ support is now built into the MAIN app instead (NdkPlugin is a
+# built-in in app/ide-core, registered in BuiltInPlugins.kt, with usesHostNativeLibrary = true so it uses
+# THIS app's own lib*.so — see app/ide-core/src/main/kotlin/dev/codeassist/ndk/NdkPlugin.kt and
+# app/ide-android/build.gradle.kts's ndkToolchainLibs/packToolchainAssets). So this workflow now builds
+# :ide-android:assembleDebug instead, the same target apk.yml already builds on every push — the only
+# difference is THIS run also feeds it the LLVM toolchain, which apk.yml never builds (too slow to run on
+# every push).
 #
 # What it does, in two jobs:
 #   1. build-toolchain: runs tools/ndk-toolchain/build-llvm-android.sh, which cross-compiles a clang+lld+
@@ -20,18 +28,19 @@
 #      need tuning (a smaller LLVM target list, a larger runner) if it runs out of space or exceeds the job
 #      time limit. Manual trigger only (workflow_dispatch) -- deliberately never on every push, since a full
 #      LLVM build is multiple hours.
-#   2. build-ndk-plugin-apk: needs the first job, points Gradle at its output
-#      (-Pndk.toolchain.dir=...), and builds `:samples:ndk-plugin:assembleDebug` -- the SEPARATE installable
-#      plugin APK (dev.codeassist.ndk) that carries the compiler. This is what actually needs to be
-#      installed alongside the main CodeAssist APK for on-device C/C++ compilation to work.
+#   2. build-apk-with-toolchain: needs the first job, downloads its output to the exact path
+#      app/ide-android/build.gradle.kts reads by default (tools/ndk-toolchain/build/out), and builds
+#      `:ide-android:assembleDebug` -- the MAIN app, now with a working on-device C/C++ compiler.
 #
 # Run it from the Actions tab (Run workflow) once it's in .github/workflows/. Expect the first job to take
 # a long time; if it fails on disk space, the LLVM_TARGETS_TO_BUILD / disk-cleanup steps below are the first
-# things to adjust.
+# things to adjust. Until this has run once and its output is committed/cached somewhere durable, every
+# ordinary apk.yml build stays fully working, just without C/C++ (NdkPlugin reports "no toolchain for this
+# device's ABI" instead of failing).
 #
 # ---
 
-name: NDK Plugin APK
+name: NDK Toolchain + APK
 
 on:
   workflow_dispatch:
@@ -47,8 +56,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # LLVM needs real disk headroom; GitHub's runners report ~14 GB free but a lot of that is already
-      # spoken for. Removing preinstalled toolchains this build doesn't use buys back several GB.
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
@@ -74,8 +81,8 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  build-ndk-plugin-apk:
-    name: assembleDebug (:samples:ndk-plugin)
+  build-apk-with-toolchain:
+    name: assembleDebug (:ide-android, with NDK toolchain baked in)
     needs: build-toolchain
     runs-on: ubuntu-latest
     steps:
@@ -101,13 +108,13 @@ jobs:
         with:
           packages: "platform-tools platforms;android-36 platforms;android-36.1 build-tools;36.0.0"
 
-      - name: Build debug APK
-        run: ./gradlew :samples:ndk-plugin:assembleDebug --console=plain --stacktrace
+      - name: Build debug APK (main app, with C/C++ toolchain)
+        run: ./gradlew :ide-android:assembleDebug --console=plain --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ndk-plugin-debug-apk
-          path: samples/ndk-plugin/build/outputs/apk/debug/*.apk
+          name: codeassist-ndk-debug-apk
+          path: app/ide-android/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 30
