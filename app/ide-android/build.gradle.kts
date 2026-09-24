@@ -405,6 +405,23 @@ val realAdmobInterstitialUnitId = (findProperty("ADMOB_INTERSTITIAL_UNIT_ID") as
     ?: System.getenv("ADMOB_INTERSTITIAL_UNIT_ID")
     ?: "ca-app-pub-7523005242346905/6735189457"
 
+// --- on-device NDK toolchain paths (declared here, BEFORE `android {}` below) ---------------------
+// MUST be declared before the `android {}` block: Gradle Kotlin DSL scripts initialize top-level `val`s in
+// file order, and `android {}` runs eagerly the moment it's evaluated (it's not a lazy/deferred block). It
+// references ndkToolchainLibs/ndkToolchainAssetsDir directly via `sourceSets...srcDir(...)`, so if those vals
+// were declared further down the file (as they originally were, in the "--- on-device NDK toolchain (C/C++)
+// ---" section below), `android {}` would read them before their initializers ran — a non-null `File` property
+// silently reads as null in that window, which is exactly the crash this ordering avoids:
+// `DefaultAndroidSourceDirectorySet.srcDir(null)` / NullPointerException at (what was) build.gradle.kts:492.
+// See the "on-device NDK toolchain (C/C++)" section further down for what these paths mean and how
+// packToolchainAssets uses ndkToolchainSourceAssets/ndkToolchainAssetsDir.
+val ndkToolchainOut: File =
+    (providers.gradleProperty("ndk.toolchain.dir").orNull?.let(::File)
+        ?: rootProject.file("tools/ndk-toolchain/build/out"))
+val ndkToolchainLibs: File = File(ndkToolchainOut, "jniLibs")
+val ndkToolchainSourceAssets: File = File(ndkToolchainOut, "assets/toolchain")
+val ndkToolchainAssetsDir: File = layout.buildDirectory.dir("generated/ndk-toolchain/assets").get().asFile
+
 android {
     namespace = "dev.ide.android"
     compileSdk = 36
@@ -488,7 +505,8 @@ android {
     // ported from (see ndkToolchainLibs/packToolchainAssets below), now landing in THIS app's own APK
     // instead of a separate one, since NdkPlugin (app/ide-core) registers with usesHostNativeLibrary =
     // true. jniLibs.useLegacyPackaging (in packaging{} below) already applies to every jniLibs source, not
-    // just aapt2's, so no change needed there.
+    // just aapt2's, so no change needed there. (ndkToolchainLibs/ndkToolchainAssetsDir are declared above,
+    // before this `android {}` block — see the note there.)
     sourceSets.getByName("main").jniLibs.srcDir(ndkToolchainLibs)
     sourceSets.getByName("main").assets.srcDir(ndkToolchainAssetsDir)
     sourceSets.getByName("androidTest").assets.srcDir(layout.buildDirectory.dir("vm-spike-asset").get().asFile)
@@ -729,13 +747,10 @@ val fetchAndroidBuildTools = tasks.register("fetchAndroidBuildTools") {
 // instead, in assets/ -- see packToolchainAssets. Both halves are read back in app/ide-core's NdkToolchain
 // via PluginRegistration.nativeLibrary()/dataDir, which now resolve against THIS app's own package because
 // NdkPlugin's manifest sets usesHostNativeLibrary = true (see ApplicationEnvironment.hostNativeLibraryDir).
-val ndkToolchainOut: File =
-    (providers.gradleProperty("ndk.toolchain.dir").orNull?.let(::File)
-        ?: rootProject.file("tools/ndk-toolchain/build/out"))
-val ndkToolchainLibs: File = File(ndkToolchainOut, "jniLibs")
-val ndkToolchainSourceAssets: File = File(ndkToolchainOut, "assets/toolchain")
-val ndkToolchainAssetsDir: File = layout.buildDirectory.dir("generated/ndk-toolchain/assets").get().asFile
-
+//
+// ndkToolchainOut/ndkToolchainLibs/ndkToolchainSourceAssets/ndkToolchainAssetsDir are declared ABOVE, before
+// the `android {}` block — see the note there for why (android{} reads ndkToolchainLibs/ndkToolchainAssetsDir
+// eagerly, so they must already be initialized by the time it runs).
 val packToolchainAssets = tasks.register<Zip>("packToolchainAssets") {
     description = "Pack the NDK toolchain's headers and link libraries into one assets/toolchain.zip (see the note above)."
     from(ndkToolchainSourceAssets)
