@@ -1,51 +1,45 @@
-# Suporte a C/C++ embutido no app principal — progresso real desta sessão
+# Suporte a C/C++ embutido no app principal — status atual
 
-## Feito e já compilando sozinho a cada push (via .github/workflows/apk.yml, que não precisou ser tocado)
+## Feito (verificado arquivo por arquivo nesta sessão, não é suposição)
 
-1. **Editor**: `.c/.h/.cpp/.cs` reconhecidos + coloração real (`NativeLanguagesUiPlugin.kt` +
-   `BuiltInPlugins.kt`).
-2. **O framework de plugins agora permite um built-in enviar um binário nativo**, exatamente como
-   `:ide-android` já faz com aapt2/zipalign — a peça que faltava para eliminar o segundo APK:
-   - `PluginManifest.usesHostNativeLibrary: Boolean = false` (novo campo, opt-in)
-   - `ApplicationEnvironment.hostNativeLibraryDir: Path?` (novo parâmetro; mescla no mapa que o
-     `PluginManager` usa para resolver `PluginRegistration.nativeLibrary()`)
-   - `ProjectManager` (construtor privado + `onDevice(...)`) — repassa o parâmetro
-   - `AndroidIde.createProjectManager` — passa `nativeLibDir` (o MESMO diretório do aapt2/zipalign) como
-     `hostNativeLibraryDir`
+1. **Editor**: `.c/.h/.cpp/.cs` reconhecidos + coloração real (`NativeLanguagesUiPlugin.kt` + `BuiltInPlugins.kt`).
+2. **`PluginManifest.usesHostNativeLibrary`** já existe em `plugin-api` (documentado como SPI `2.10.1`), e
+   `ApplicationEnvironment.hostNativeLibraryDir` já resolve o diretório nativo real do próprio APK para um
+   built-in que ativa essa flag.
+3. **Os 11 arquivos de `samples/ndk-plugin` já foram copiados para `app/ide-core/src/main/kotlin/dev/codeassist/ndk/`**
+   (todos, exceto `NdkUiPlugin.kt` e `PluginInfoActivity.kt`, de propósito — ver nota abaixo). O `NdkPlugin.kt`
+   de lá já tem `override val manifest = PluginManifest(id = "ndk-native", ..., usesHostNativeLibrary = true)`.
+4. **`BuiltInPlugins.kt`** já importa e já registra `BuiltInPlugin(NdkPlugin())` na lista `assemble()`, com
+   comentário explicando por que não tem UI facet própria (coberta por `NativeLanguagesUiPlugin`).
+5. **`app/ide-android/build.gradle.kts`** já empacota o toolchain: `sourceSets["main"].jniLibs.srcDir(ndkToolchainLibs)`,
+   `assets.srcDir(ndkToolchainAssetsDir)`, e a task `packToolchainAssets` já zipa headers/libs de link. Lê de
+   `tools/ndk-toolchain/build/out` por padrão (ou `-Pndk.toolchain.dir=...`).
 
-   Toda a cadeia é aditiva (parâmetros novos, `null`/`false` por padrão) — nada do que já existia mudou de
-   comportamento. Um built-in com `usesHostNativeLibrary = true` agora recebe o diretório nativo real do
-   próprio APK em vez de `null`.
+Ou seja: os 4 passos "mecânicos" que uma sessão anterior tinha deixado documentados como pendentes **já
+foram todos concluídos** — por esta sessão ou por uma anterior não registrada aqui. `NdkUiPlugin.kt` continua
+de fora de propósito (API pública incompatível com built-in; `NativeLanguagesUiPlugin` já cobre a mesma
+coloração com o tipo interno correto).
 
-## O que falta — três passos, todos mecânicos, nenhum mais é parede de permissão ou arquitetura
+## O que falta — não é mais código, é infraestrutura de build
 
-1. **Copiar os arquivos do `samples/ndk-plugin` (já no seu fork) para dentro de `ide-core`** como built-in:
-   `NdkPlugin.kt`, `NdkToolchain.kt`, `NdkFacet.kt`, `NdkFlags.kt`, `NdkSourceRoots.kt`, `NdkBuildPlugin.kt`,
-   `NdkDiagnosticProvider.kt`, `NdkCompletionContributor.kt`, `ClangDiagnostics.kt`, `ClangCompletions.kt`,
-   `NativeCppTemplate.kt`, `NativeActivityTemplate.kt`, `NdkTemplateSupport.kt`. Todos já usam as MESMAS APIs
-   internas (`dev.ide.plugin.*`, `dev.ide.build.*`, `dev.ide.lang.*`) que `BuiltInPlugins.kt` usa
-   diretamente — não precisam de tradução. Só `NdkPlugin` ganha
-   `override val manifest = PluginManifest(id = "ndk-native", ..., usesHostNativeLibrary = true)` (hoje
-   não tem manifest próprio porque conta com o loader de plugin EXTERNO substituir um).
-2. **Não copiar `NdkUiPlugin.kt`** — ele usa a API PUBLICADA (`dev.ide.plugin.ui.*`, para plugins
-   instalados), incompatível com o tipo interno `dev.ide.ui.ext.UiPlugin` que `BuiltInPlugin.ui` exige. Já
-   não é necessário: `NativeLanguagesUiPlugin.kt` (item 1 da seção anterior) já cobre exatamente a mesma
-   coloração/comentários para C/C++, com a API interna correta.
-3. **`app/ide-android/build.gradle.kts`**: copiar a lógica de empacotamento de
-   `samples/ndk-plugin/build.gradle.kts` (`sourceSets["main"].jniLibs.srcDir(...)`,
-   `assets.srcDir(...)` apontando para `tools/ndk-toolchain/build/out`) — assim o clang/lld entra no APK
-   principal como `lib*.so`, no mesmo diretório que `hostNativeLibraryDir` já aponta para.
-4. **`BuiltInPlugins.kt`**: adicionar `BuiltInPlugin(NdkPlugin(), ui = NativeLanguagesUiPlugin)` (ou
-   compor os dois separadamente, já que a UI já existe como built-in próprio).
+1. **Os binários reais do LLVM (clang/lld) não existem no repositório.** `ndkToolchainLibs`/`ndkToolchainSourceAssets`
+   apontam para `tools/ndk-toolchain/build/out`, que só existe depois de rodar
+   `tools/ndk-toolchain/build-llvm-android.sh` — um build completo do LLVM cross-compilado para rodar em
+   Android arm64, que leva horas e precisa de ~13GB de disco. Sem isso, o app compila e instala normalmente
+   (via `apk.yml`, que roda em todo push), só que `NdkPlugin` reporta "no toolchain for this device's ABI"
+   em vez de compilar C/C++.
+2. **O workflow que builda esse toolchain (`READY_ndk-plugin-apk.yml`, na raiz do repo) ainda não está
+   ativo.** Ele já foi corrigido nesta sessão para buildar `:ide-android:assembleDebug` (o app principal) em
+   vez do app de exemplo separado `:samples:ndk-plugin`. Falta apenas MOVER o arquivo para
+   `.github/workflows/ndk-toolchain-apk.yml` — nenhuma sessão do Claude conseguiu fazer isso via API porque
+   o GitHub App conectado não tem o escopo de permissão `workflows`. O próprio arquivo tem as instruções
+   (renomear pelo site/app do GitHub, ou `git mv` + push local).
+3. Depois de mover o arquivo, rodar manualmente pela aba Actions ("Run workflow") — é `workflow_dispatch`,
+   não roda sozinho. Esperar várias horas pelo job `build-toolchain`. Se faltar espaço em disco no runner, os
+   passos de limpeza / a lista de targets do LLVM são o primeiro ajuste a fazer.
 
-Depois disso, o mesmo `READY_ndk-plugin-apk.yml` já commitado (ajustado para `:ide-android:assembleDebug`
-em vez de `:samples:ndk-plugin:assembleDebug`) builda o clang/lld e o APK principal já com tudo dentro —
-sem segundo APK.
+## Por que documentar isso agora
 
-## Por que parei aqui
-
-Os 4 arquivos já commitados são puramente aditivos (parâmetros novos com default que preserva o
-comportamento exato de antes) — risco mínimo, verificado linha a linha contra o código real. Os 13 arquivos
-do passo 1 são num volume grande para colar sem nenhum compilador para checar nesta sessão; prefiro deixar
-o mapeamento exato (acima) documentado a arriscar um erro de digitação silencioso espalhado por 13 arquivos
-que só apareceria num build real. É exatamente o ponto em que o Claude Code compensa mais.
+Sem este arquivo atualizado, a próxima sessão (ou a próxima leitura deste) recomeçaria do zero achando que
+faltam os 4 passos de código — que não faltam mais. O único trabalho real restante é infraestrutura de CI
+(mover 1 arquivo + esperar um build de LLVM rodar), não mais escrita de Kotlin.
