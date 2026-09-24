@@ -42,7 +42,10 @@ log() { printf '\n==> %s\n' "$*"; }
 # several GB of objects behind and no way to tell which are complete.
 require_disk() {
     local need_gb="$1" avail_gb
-    avail_gb=$(df -g "$WORK" | awk 'NR==2 {print $4}')
+    # -P (POSIX output format) + -k (always report in 1024-byte blocks) are the one pair both GNU df
+    # (Ubuntu runners) and BSD/macOS df accept identically; `-g` is BSD/macOS-only and GNU df rejects it
+    # ("invalid option -- 'g'"). $WORK may not exist yet on the very first call, so fall back to `.`.
+    avail_gb=$(df -Pk "${WORK:-.}" 2>/dev/null | awk 'NR==2 {printf "%d", $4/1024/1024}')
     if [ "$avail_gb" -lt "$need_gb" ]; then
         echo "Only ${avail_gb} GB free under $WORK; this stage needs ${need_gb} GB. Stopping." >&2
         exit 1
