@@ -19,6 +19,11 @@ import dev.ide.model.template.TemplateParameter
  * The event loop is written out rather than stubbed. An empty `android_main` returns immediately and the app
  * looks broken instead of empty, so the generated loop handles the two events that decide whether an app is
  * alive: a window arriving and going away.
+ *
+ * "No Java" is this template's STARTING shape, not a wall: `android-app` is the same module type the plain
+ * Kotlin/Java `AndroidAppTemplate` uses, so its own Java/Kotlin source sets and compiler are already wired
+ * for this module too -- adding `.kt`/`.java` files and flipping `android:hasCode` back to the default
+ * (true) is the whole migration (see the generated README's "Adding Kotlin or Java later" section).
  */
 class NativeActivityTemplate : ProjectTemplate {
 
@@ -83,7 +88,7 @@ class NativeActivityTemplate : ProjectTemplate {
         scaffold.writeText("app/src/main/cpp/$library.cpp", nativeActivitySource(library))
         scaffold.writeText("app/src/main/AndroidManifest.xml", manifest(packageName, library))
         scaffold.writeText("app/src/main/res/values/strings.xml", strings(args.name))
-        scaffold.writeText("README.md", readme(library, standard))
+        scaffold.writeText("README.md", readme(library, standard, packageName))
     }
 
     /** `android_main` driving the glue's event loop. The entry point; nothing calls it from Java. */
@@ -167,7 +172,7 @@ class NativeActivityTemplate : ProjectTemplate {
         </resources>
     """.trimIndent() + "\n"
 
-    private fun readme(library: String, standard: String): String = """
+    private fun readme(library: String, standard: String, packageName: String): String = """
         # Native activity
 
         An Android app written entirely in C++, compiled on the device. The toolchain is a clang and an lld
@@ -184,5 +189,29 @@ class NativeActivityTemplate : ProjectTemplate {
 
         Errors appear in the editor as you type, reported by the same clang that builds the code, so the two
         cannot disagree.
+
+        ## Adding Kotlin or Java later
+
+        This module's type (`android-app`) is the SAME one a plain Kotlin/Java Android app uses -- "no Java"
+        is this template's starting shape, not something the build system enforces. To add UI or other code
+        in Kotlin or Java alongside the C++:
+
+        1. Add source files under `app/src/main/kotlin/<package>/` (Kotlin) or `app/src/main/java/<package>/`
+           (Java) -- the same layout `AndroidAppTemplate`-generated projects use. They compile automatically;
+           no change to `module.toml` is needed for this part.
+        2. In `AndroidManifest.xml`, remove `android:hasCode="false"` (or set it to `true`) -- it exists only
+           to tell the platform "there are no classes here", which stops being accurate. Leaving it `false`
+           while Kotlin/Java classes exist does not break the build, but it is a lie the manifest is telling.
+        3. Decide who launches the app. `android.app.NativeActivity` calls `android_main` directly and never
+           runs any Kotlin/Java you add. For a normal Activity to run your added code (with the option to
+           still call into $library.cpp via JNI, the way the "Kotlin + C/C++" / "Java + C/C++" Android App
+           template does it), replace `android.app.NativeActivity` with your own Activity class in the
+           manifest's `<activity android:name=...>`, and give it a `System.loadLibrary("$library")` call plus
+           `external`/`native` method declarations for whichever C++ functions it should call directly.
+
+        If what you actually want from the start is "Kotlin or Java UI calling into a C/C++ engine", the
+        "Android App" template's "Kotlin + C/C++" / "Java + C/C++" language options generate that shape
+        directly (a normal Activity, JNI bridge, and $library-equivalent all wired already) -- this manual
+        path is for a project that started here, as C++-only, and grew a UI later.
     """.trimIndent() + "\n"
 }
