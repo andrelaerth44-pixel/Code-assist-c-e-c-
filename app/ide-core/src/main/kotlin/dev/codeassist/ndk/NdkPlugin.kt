@@ -20,6 +20,7 @@ import dev.ide.plugin.action.ActionResult
 import dev.ide.plugin.action.SimpleAction
 import dev.ide.plugin.action.UI_ACTION_EP
 import java.nio.file.Files
+import java.nio.file.Path
 import kotlin.io.path.writeText
 
 /**
@@ -130,6 +131,48 @@ class NdkPlugin : Plugin {
             },
         )
 
+        // A SECOND, heavier check: a multi-file "mini drawing engine" (several .cpp/.h pairs, cross-
+        // including each other, with STL containers and virtual dispatch), compiled file-by-file and linked
+        // into one .so. `checkToolchain` above proves the toolchain runs at all; this proves it holds up at
+        // roughly the SHAPE a real brush/canvas engine needs -- multiple translation units, headers included
+        // across files, inheritance, std::vector<std::unique_ptr<T>> -- before real engine work is built on
+        // top of it. See [NdkScaleProbe].
+        reg.register(
+            UI_ACTION_EP,
+            SimpleAction(
+                id = "dev.codeassist.ndk.scaleProbe",
+                text = "NDK: multi-file build test (drawing-engine scale)",
+                places = setOf(ActionPlaces.COMMAND_PALETTE, ActionPlaces.MORE_MENU),
+                iconId = "build",
+            ) {
+                when (val status = toolchain.prepare()) {
+                    is NdkToolchain.Status.Unavailable -> {
+                        log.warn("toolchain unavailable: ${status.reason}")
+                        messages?.show(
+                            dev.ide.platform.notify.UserMessage(
+                                status.reason,
+                                dev.ide.platform.notify.MessageSeverity.WARNING,
+                            )
+                        )
+                        ActionResult.message(status.reason)
+                    }
+
+                    is NdkToolchain.Status.Ready -> {
+                        val result = NdkScaleProbe.run(toolchain, reg.dataDir.resolve("scale-probe"))
+                        log.info("scale probe: $result")
+                        NdkState.lastCheck = result
+                        val severity = if (result.startsWith("OK")) {
+                            dev.ide.platform.notify.MessageSeverity.INFO
+                        } else {
+                            dev.ide.platform.notify.MessageSeverity.WARNING
+                        }
+                        messages?.show(dev.ide.platform.notify.UserMessage(result, severity))
+                        ActionResult.message(result)
+                    }
+                }
+            },
+        )
+
         log.info("registered; toolchain is prepared on first use")
     }
 
@@ -186,4 +229,270 @@ object NdkState {
 
     @Volatile
     var lastCheck: String? = null
+}
+
+/**
+ * A multi-file "mini drawing engine", written to disk and built exactly the way a real module would be: one
+ * `.cpp` per translation unit, headers `#include`d ACROSS files (not just within one), a small class
+ * hierarchy with virtual dispatch, and the STL containers a brush/layer/canvas engine actually reaches for
+ * (`std::vector`, `std::unique_ptr`, `std::string`). [NdkPlugin.buildProbe] proves the toolchain runs at
+ * all; this proves it holds up at roughly the SHAPE that scale of engine needs, before real engine work is
+ * built on top of it.
+ *
+ * The shape, file by file (deliberately mirroring the [[app-animacao]]-style domain: strokes, layers, a
+ * canvas, more than one brush):
+ *  - `Point.h` / `Color.h` -- plain structs, included by everything below them.
+ *  - `Brush.h` -- an abstract base (`virtual ~Brush()`, pure-virtual `width()`), forcing a vtable and
+ *    dynamic dispatch, not just templates the compiler could inline away.
+ *  - `PencilBrush.h/.cpp`, `MarkerBrush.h/.cpp` -- two concrete brushes, each its own translation unit,
+ *    each `#include`ing `Brush.h`.
+ *  - `Stroke.h/.cpp` -- holds `std::vector<Point>` and a `std::unique_ptr<Brush>`; `#include`s `Point.h`,
+ *    `Color.h` and `Brush.h`.
+ *  - `Layer.h/.cpp` -- `std::vector<std::unique_ptr<Stroke>>`; `#include`s `Stroke.h`.
+ *  - `Canvas.h/.cpp` -- `std::vector<std::unique_ptr<Layer>>`; `#include`s `Layer.h`, so by this point the
+ *    include chain is four files deep, which is the thing a one-file probe cannot exercise at all.
+ *  - `main.cpp` -- builds a small `Canvas`, adds strokes with both brush types, and returns a checksum
+ *    derived from the real object graph (not a constant), so a build that silently produced the WRONG
+ *    program (a stale link, a shadowed symbol) is as likely to be caught as one that failed outright.
+ *
+ * Nine translation units compiled separately and linked into one `.so` -- proportionally small next to a
+ * real engine, but the same KIND of build: cross-header dependencies, polymorphism, ownership, multiple
+ * `.o` files meeting only at link time.
+ */
+internal object NdkScaleProbe {
+
+    fun run(toolchain: NdkToolchain, dir: Path): String {
+        val srcDir = dir.resolve("src")
+        Files.createDirectories(srcDir)
+        val objDir = dir.resolve("obj")
+        Files.createDirectories(objDir)
+
+        for ((name, content) in files()) srcDir.resolve(name).writeText(content)
+
+        val flags = listOf("-std=c++17", "-fPIC", "-I", srcDir.toString())
+        val objects = mutableListOf<Path>()
+        for (cppFile in listOf("PencilBrush.cpp", "MarkerBrush.cpp", "Stroke.cpp", "Layer.cpp", "Canvas.cpp", "main.cpp")) {
+            val source = srcDir.resolve(cppFile)
+            val obj = objDir.resolve(cppFile.removeSuffix(".cpp") + ".o")
+            val result = toolchain.compile(source, obj, cpp = true, extraFlags = flags)
+            if (!result.ok) return "FAILED compiling $cppFile:\n${result.output.take(800)}"
+            objects += obj
+        }
+
+        val so = dir.resolve("libscaleprobe.so")
+        val linked = toolchain.linkShared(objects, so, libs = listOf("log"))
+        if (!linked.ok) return "FAILED linking (${objects.size} object files):\n${linked.output.take(800)}"
+
+        return "OK: ${objects.size} files compiled separately (cross-including headers, virtual dispatch, " +
+            "std::vector<std::unique_ptr<T>>) and linked into ${so.fileName} (${Files.size(so)} bytes)"
+    }
+
+    private fun files(): Map<String, String> = mapOf(
+        "Point.h" to """
+            #pragma once
+            struct Point {
+                float x = 0.0f;
+                float y = 0.0f;
+            };
+        """.trimIndent() + "\n",
+
+        "Color.h" to """
+            #pragma once
+            #include <cstdint>
+            struct Color {
+                uint8_t r = 0, g = 0, b = 0, a = 255;
+            };
+        """.trimIndent() + "\n",
+
+        "Brush.h" to """
+            #pragma once
+            // An abstract base with a pure-virtual method: this forces a real vtable and dynamic dispatch,
+            // the thing a template-only test would let the compiler optimize away entirely.
+            class Brush {
+            public:
+                virtual ~Brush() = default;
+                virtual float width() const = 0;
+                virtual const char* name() const = 0;
+            };
+        """.trimIndent() + "\n",
+
+        "PencilBrush.h" to """
+            #pragma once
+            #include "Brush.h"
+            class PencilBrush : public Brush {
+            public:
+                float width() const override;
+                const char* name() const override;
+            };
+        """.trimIndent() + "\n",
+
+        "PencilBrush.cpp" to """
+            #include "PencilBrush.h"
+            float PencilBrush::width() const { return 1.5f; }
+            const char* PencilBrush::name() const { return "pencil"; }
+        """.trimIndent() + "\n",
+
+        "MarkerBrush.h" to """
+            #pragma once
+            #include "Brush.h"
+            class MarkerBrush : public Brush {
+            public:
+                float width() const override;
+                const char* name() const override;
+            };
+        """.trimIndent() + "\n",
+
+        "MarkerBrush.cpp" to """
+            #include "MarkerBrush.h"
+            float MarkerBrush::width() const { return 8.0f; }
+            const char* MarkerBrush::name() const { return "marker"; }
+        """.trimIndent() + "\n",
+
+        "Stroke.h" to """
+            #pragma once
+            #include <memory>
+            #include <vector>
+            #include "Point.h"
+            #include "Color.h"
+            #include "Brush.h"
+
+            class Stroke {
+            public:
+                Stroke(std::unique_ptr<Brush> brush, Color color);
+                void addPoint(Point p);
+                // A double-precision accumulator over the real point data, not a constant, so a stale or
+                // wrong link is as likely to be caught as an outright build failure.
+                double pathLength() const;
+                const Brush& brush() const { return *brush_; }
+                Color color() const { return color_; }
+                size_t pointCount() const { return points_.size(); }
+
+            private:
+                std::unique_ptr<Brush> brush_;
+                Color color_;
+                std::vector<Point> points_;
+            };
+        """.trimIndent() + "\n",
+
+        "Stroke.cpp" to """
+            #include "Stroke.h"
+            #include <cmath>
+
+            Stroke::Stroke(std::unique_ptr<Brush> brush, Color color)
+                : brush_(std::move(brush)), color_(color) {}
+
+            void Stroke::addPoint(Point p) { points_.push_back(p); }
+
+            double Stroke::pathLength() const {
+                double total = 0.0;
+                for (size_t i = 1; i < points_.size(); ++i) {
+                    double dx = points_[i].x - points_[i - 1].x;
+                    double dy = points_[i].y - points_[i - 1].y;
+                    total += std::sqrt(dx * dx + dy * dy);
+                }
+                return total;
+            }
+        """.trimIndent() + "\n",
+
+        "Layer.h" to """
+            #pragma once
+            #include <memory>
+            #include <vector>
+            #include "Stroke.h"
+
+            class Layer {
+            public:
+                Stroke& addStroke(std::unique_ptr<Brush> brush, Color color);
+                size_t strokeCount() const { return strokes_.size(); }
+                double totalLength() const;
+
+            private:
+                std::vector<std::unique_ptr<Stroke>> strokes_;
+            };
+        """.trimIndent() + "\n",
+
+        "Layer.cpp" to """
+            #include "Layer.h"
+
+            Stroke& Layer::addStroke(std::unique_ptr<Brush> brush, Color color) {
+                strokes_.push_back(std::make_unique<Stroke>(std::move(brush), color));
+                return *strokes_.back();
+            }
+
+            double Layer::totalLength() const {
+                double total = 0.0;
+                for (const auto& s : strokes_) total += s->pathLength();
+                return total;
+            }
+        """.trimIndent() + "\n",
+
+        "Canvas.h" to """
+            #pragma once
+            #include <memory>
+            #include <vector>
+            #include "Layer.h"
+
+            // Four #include hops deep from here down to Point.h/Color.h/Brush.h -- the thing a single-file
+            // probe cannot exercise, and where a stale header or a missing include guard would first show up.
+            class Canvas {
+            public:
+                Layer& addLayer();
+                size_t layerCount() const { return layers_.size(); }
+                double totalLength() const;
+
+            private:
+                std::vector<std::unique_ptr<Layer>> layers_;
+            };
+        """.trimIndent() + "\n",
+
+        "Canvas.cpp" to """
+            #include "Canvas.h"
+
+            Layer& Canvas::addLayer() {
+                layers_.push_back(std::make_unique<Layer>());
+                return *layers_.back();
+            }
+
+            double Canvas::totalLength() const {
+                double total = 0.0;
+                for (const auto& l : layers_) total += l->totalLength();
+                return total;
+            }
+        """.trimIndent() + "\n",
+
+        "main.cpp" to """
+            #include "Canvas.h"
+            #include "PencilBrush.h"
+            #include "MarkerBrush.h"
+            #include <memory>
+
+            // extern "C": the entry point this test calls back into from Kotlin, past name mangling.
+            // Builds a small but real object graph (2 layers, 3 strokes across both brush types, several
+            // points each) and returns a value DERIVED from it, so a wrong link or a shadowed symbol changes
+            // the answer instead of silently passing.
+            extern "C" int ca_scale_probe() {
+                Canvas canvas;
+
+                Layer& layer1 = canvas.addLayer();
+                Stroke& s1 = layer1.addStroke(std::make_unique<PencilBrush>(), Color{255, 0, 0, 255});
+                s1.addPoint({0.0f, 0.0f});
+                s1.addPoint({10.0f, 0.0f});
+                s1.addPoint({10.0f, 10.0f});
+
+                Stroke& s2 = layer1.addStroke(std::make_unique<MarkerBrush>(), Color{0, 255, 0, 255});
+                s2.addPoint({0.0f, 0.0f});
+                s2.addPoint({5.0f, 5.0f});
+
+                Layer& layer2 = canvas.addLayer();
+                Stroke& s3 = layer2.addStroke(std::make_unique<PencilBrush>(), Color{0, 0, 255, 255});
+                s3.addPoint({0.0f, 0.0f});
+                s3.addPoint({3.0f, 4.0f});
+
+                int checksum = static_cast<int>(canvas.totalLength() * 100.0);
+                checksum += static_cast<int>(canvas.layerCount());
+                checksum += static_cast<int>(s1.brush().width() + s2.brush().width() + s3.brush().width());
+                return checksum;
+            }
+        """.trimIndent() + "\n",
+    )
 }
