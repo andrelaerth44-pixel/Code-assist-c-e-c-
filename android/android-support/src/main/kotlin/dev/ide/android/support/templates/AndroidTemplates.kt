@@ -3,6 +3,8 @@ package dev.ide.android.support.templates
 import dev.ide.android.support.AndroidApiLevels
 import dev.ide.android.support.AndroidFacet
 import dev.ide.model.BuildSystemId
+import dev.ide.model.ContentRole
+import dev.ide.model.FacetData
 import dev.ide.model.template.ProjectScaffold
 import dev.ide.model.template.ProjectTemplate
 import dev.ide.model.template.TemplateArgs
@@ -37,16 +39,32 @@ internal object AndroidTemplateSupport {
         help = "The API level the app is built and optimised against.",
     )
 
-    /** Source language for the generated starter code. */
+    // The two "hybrid" language values, alongside the plain "java"/"kotlin" ones: a UI language PLUS a C/C++
+    // engine module in the same app, wired through JNI. Kept as two extra options on the SAME picker (not a
+    // separate template) because they are the plain app with one thing added, not a different kind of app --
+    // the same reasoning NativeActivityTemplate documents for why IT is a separate template (a C++-only app
+    // is genuinely a different shape, not a variant of this one).
+    const val LANG_JAVA = "java"
+    const val LANG_KOTLIN = "kotlin"
+    const val LANG_JAVA_CPP = "java-cpp"
+    const val LANG_KOTLIN_CPP = "kotlin-cpp"
+
+    /** Source language for the generated starter code, plus the two "+ C/C++" hybrid options (a UI language
+     *  with a JNI-bridged native engine module alongside it -- for drawing/canvas/game engines that need
+     *  C/C++ speed under a Kotlin or Java UI). */
     val languageParam = TemplateParameter.Choice(
         key = "language",
         label = "Language",
         options = listOf(
-            TemplateParameter.Choice.Option("java", "Java"),
-            TemplateParameter.Choice.Option("kotlin", "Kotlin"),
+            TemplateParameter.Choice.Option(LANG_JAVA, "Java"),
+            TemplateParameter.Choice.Option(LANG_KOTLIN, "Kotlin"),
+            TemplateParameter.Choice.Option(LANG_JAVA_CPP, "Java + C/C++"),
+            TemplateParameter.Choice.Option(LANG_KOTLIN_CPP, "Kotlin + C/C++"),
         ),
         defaultIndex = 0,
-        help = "Language of the starter source files.",
+        help = "Language of the starter source files. The \"+ C/C++\" options add a JNI-bridged native " +
+            "engine module alongside the UI -- for a drawing canvas, brush engine, or game loop that needs " +
+            "C/C++ speed, with the UI itself still in Kotlin or Java.",
     )
 
     /** What every built-in template compiles against: the newest level the IDE ships support for. */
@@ -55,7 +73,48 @@ internal object AndroidTemplateSupport {
     /** Google's Material Components for Android — the library behind Material You theming + the FAB/Snackbar. */
     const val MATERIAL_COORDINATE = "com.google.android.material:material:1.12.0"
 
-    fun isKotlin(args: TemplateArgs): Boolean = args.string("language", "java").equals("kotlin", ignoreCase = true)
+    fun isKotlin(args: TemplateArgs): Boolean {
+        val lang = args.string("language", LANG_JAVA)
+        return lang.equals(LANG_KOTLIN, ignoreCase = true) || lang.equals(LANG_KOTLIN_CPP, ignoreCase = true)
+    }
+
+    /** Whether the "+ C/C++" hybrid was picked -- a JNI-bridged native engine module alongside the UI. */
+    fun isCppHybrid(args: TemplateArgs): Boolean {
+        val lang = args.string("language", LANG_JAVA)
+        return lang.equals(LANG_JAVA_CPP, ignoreCase = true) || lang.equals(LANG_KOTLIN_CPP, ignoreCase = true)
+    }
+
+    /** The native library name for the hybrid templates, matching what `System.loadLibrary` is given and
+     *  what the generated .cpp file is named. */
+    const val CPP_LIBRARY_NAME = "native-engine"
+
+    /**
+     * The JNI export name for a native method on `MainActivity`, following the JNI naming convention
+     * (`Java_<package_with_underscores>_<Class>_<method>`). Dots in the package become underscores; this
+     * covers the common case (a package with no underscores of its own) rather than the full JNI escaping
+     * rules, which is the right tradeoff for a generated starter file a user is meant to read and extend.
+     */
+    fun jniExportName(pkg: String, method: String): String =
+        "Java_${pkg.replace('.', '_')}_MainActivity_$method"
+
+    /**
+     * The starter C++ engine source for the "+ C/C++" hybrid templates: one JNI-exported function
+     * (`stringFromJNI`) the UI calls to prove the bridge works end to end, with a comment pointing at where
+     * a real drawing/game engine's entry points would go instead.
+     */
+    fun jniEngineSource(pkg: String): String = """
+        #include <jni.h>
+        #include <string>
+
+        // This is where a real drawing/brush/game engine's entry points would live -- e.g. init(), a
+        // resize(width, height), and a render()/onFrame() called from the UI's render loop. This starter
+        // wires up ONE call end to end (UI -> JNI -> C++ -> back to the UI) so you can build on it directly.
+        extern "C" JNIEXPORT jstring JNICALL
+        ${jniExportName(pkg, "stringFromJNI")}(JNIEnv* env, jobject /* this */) {
+            std::string greeting = "Hello from the C/C++ engine";
+            return env->NewStringUTF(greeting.c_str());
+        }
+    """.trimIndent() + "\n"
 
     /**
      * The module-relative ProGuard/R8 keep-rules file the `release` build type references by default
@@ -82,6 +141,15 @@ internal object AndroidTemplateSupport {
  * `AndroidManifest.xml`, `res/` (strings, colors, theme, and an `activity_main` layout), and a
  * `MainActivity` that inflates that layout to show a "Hello, World!" page. A complete, dependency-free
  * starter app that assembles to a signed APK through the existing `AndroidBuildSystem` pipeline.
+ *
+ * The "Java + C/C++" / "Kotlin + C/C++" language options add a second content root (`src/main/cpp`) and an
+ * `[ndk]` facet table to the SAME `app` module, plus a starter `.cpp` file with one JNI-exported function
+ * that `MainActivity` calls and displays. The `[ndk]` table is written as a plain named [FacetData] map
+ * (not the typed `NdkFacet` class from the `ndk-native` plugin) so this module keeps its existing
+ * independence from that plugin -- the same reverse trick `NdkPlugin` documents for why IT writes the
+ * `[android]` table as a named map instead of depending on this module. Either plugin can be absent and the
+ * project still opens; only the pairing plugin's own features (native build, C/C++ editor support) are
+ * unavailable until it's installed.
  */
 object AndroidAppTemplate : ProjectTemplate {
     override val id = TemplateId("android-app")
@@ -101,6 +169,7 @@ object AndroidAppTemplate : ProjectTemplate {
         val minSdk = args.int("minSdk", 26)
         val targetSdk = args.int("targetSdk", AndroidTemplateSupport.COMPILE_SDK)
         val kotlin = AndroidTemplateSupport.isKotlin(args)
+        val cpp = AndroidTemplateSupport.isCppHybrid(args)
         scaffold.workspace.beginModification().apply {
             addProject(args.name, BuildSystemId.NATIVE, scaffold.rootDir)
             commit()
@@ -117,6 +186,22 @@ object AndroidAppTemplate : ProjectTemplate {
                         targetSdk = targetSdk,
                     ),
                 )
+                if (cpp) {
+                    // Declaring the content root is load-bearing (see NdkTemplateSupport.scaffoldModule's
+                    // note): the IDE resolves a file to its module through DECLARED roots, so a .cpp under
+                    // an undeclared directory is invisible to the navigator and gets no analysis target.
+                    addContentRoot("main", "src/main/cpp", setOf(ContentRole.SOURCE))
+                    putFacetData(
+                        FacetData(
+                            "ndk",
+                            mapOf(
+                                "sourceDirs" to listOf("src/main/cpp"),
+                                "libraryName" to AndroidTemplateSupport.CPP_LIBRARY_NAME,
+                                "linkLibraries" to listOf("log"),
+                            ),
+                        ),
+                    )
+                }
             }
             commit()
         }
@@ -171,9 +256,30 @@ object AndroidAppTemplate : ProjectTemplate {
         for ((rel, content) in AndroidAppAssets.launcherIconResFiles) {
             scaffold.writeText("app/src/main/res/$rel", content)
         }
+        // The hybrid layout adds a second TextView for the engine's output, so a user can SEE the JNI call
+        // land -- the same "prove it end to end" reasoning as the .cpp file's comment.
         scaffold.writeText(
             "app/src/main/res/layout/activity_main.xml",
-            """
+            if (cpp) """
+            <?xml version="1.0" encoding="utf-8"?>
+            <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:orientation="vertical"
+                android:gravity="center">
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/hello_world"
+                    android:textSize="24sp"/>
+                <TextView
+                    android:id="@+id/engine_output"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="16dp"
+                    android:textSize="16sp"/>
+            </LinearLayout>
+            """ else """
             <?xml version="1.0" encoding="utf-8"?>
             <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
                 android:layout_width="match_parent"
@@ -188,10 +294,41 @@ object AndroidAppTemplate : ProjectTemplate {
             </LinearLayout>
             """,
         )
+        if (cpp) {
+            scaffold.writeText(
+                "app/src/main/cpp/${AndroidTemplateSupport.CPP_LIBRARY_NAME}.cpp",
+                AndroidTemplateSupport.jniEngineSource(pkg),
+            )
+        }
         if (kotlin) {
             scaffold.writeText(
                 "app/src/main/kotlin/$path/MainActivity.kt",
-                """
+                if (cpp) """
+                package $pkg
+
+                import android.app.Activity
+                import android.os.Bundle
+                import android.widget.TextView
+
+                class MainActivity : Activity() {
+                    // The starter engine call this bridges to; see app/src/main/cpp/${AndroidTemplateSupport.CPP_LIBRARY_NAME}.cpp.
+                    // A real drawing/game engine adds more native methods here (init/resize/render/...).
+                    external fun stringFromJNI(): String
+
+                    override fun onCreate(savedInstanceState: Bundle?) {
+                        super.onCreate(savedInstanceState)
+                        setContentView(R.layout.activity_main)
+                        findViewById<TextView>(R.id.engine_output).text = stringFromJNI()
+                    }
+
+                    companion object {
+                        // Matches libraryName in the [ndk] table (app/module.toml). Loaded once per process.
+                        init {
+                            System.loadLibrary("${AndroidTemplateSupport.CPP_LIBRARY_NAME}")
+                        }
+                    }
+                }
+                """ else """
                 package $pkg
 
                 import android.app.Activity
@@ -208,7 +345,31 @@ object AndroidAppTemplate : ProjectTemplate {
         } else {
             scaffold.writeText(
                 "app/src/main/java/$path/MainActivity.java",
-                """
+                if (cpp) """
+                package $pkg;
+
+                import android.app.Activity;
+                import android.os.Bundle;
+                import android.widget.TextView;
+
+                public class MainActivity extends Activity {
+                    // Matches libraryName in the [ndk] table (app/module.toml). Loaded once per process.
+                    static {
+                        System.loadLibrary("${AndroidTemplateSupport.CPP_LIBRARY_NAME}");
+                    }
+
+                    // The starter engine call this bridges to; see app/src/main/cpp/${AndroidTemplateSupport.CPP_LIBRARY_NAME}.cpp.
+                    // A real drawing/game engine adds more native methods here (init/resize/render/...).
+                    public native String stringFromJNI();
+
+                    @Override
+                    protected void onCreate(Bundle savedInstanceState) {
+                        super.onCreate(savedInstanceState);
+                        setContentView(R.layout.activity_main);
+                        ((TextView) findViewById(R.id.engine_output)).setText(stringFromJNI());
+                    }
+                }
+                """ else """
                 package $pkg;
 
                 import android.app.Activity;
