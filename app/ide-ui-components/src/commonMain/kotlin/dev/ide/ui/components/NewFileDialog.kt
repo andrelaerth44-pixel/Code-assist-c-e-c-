@@ -211,12 +211,13 @@ private fun NewEntryPanel(
 }
 
 // ---------------------------------------------------------------------------
-// New typed source file (Java class / Kotlin file, with a kind selector)
+// New typed source file (Java class / Kotlin file / C++ class, with a kind selector)
 // ---------------------------------------------------------------------------
 
 /** Which language a typed "New …" action scaffolds, and where. [dirLabel] is a short path shown to the user.
- *  [packages] mirrors [NewEntryRequest.packages]: the package chain so the dialog can target a middle level. */
-enum class NewSourceLang { Java, Kotlin, Aidl }
+ *  [packages] mirrors [NewEntryRequest.packages]: the package chain so the dialog can target a middle level.
+ *  [Cpp] has no package system of its own — see [PackageChips], which renders nothing when [packages] is empty. */
+enum class NewSourceLang { Java, Kotlin, Aidl, Cpp }
 data class NewSourceRequest(
     val dirPath: String,
     val lang: NewSourceLang,
@@ -242,8 +243,16 @@ private fun PackageChips(packages: List<PackageSegment>, selectedDir: String, on
     Spacer12()
 }
 
-/** A kind offered in the typed-source dialog → the backend template it scaffolds. */
-private enum class SourceKind(val label: StringResource, val template: UiNewFileTemplate) {
+/**
+ * A kind offered in the typed-source dialog → the backend template it scaffolds, plus an optional [suffix]
+ * appended to [label]'s rendered text (e.g. `" (.h)"`).
+ *
+ * The three C++ kinds reuse existing labels ([Res.string.newfile_kind_class] for Class,
+ * [Res.string.newfile_kind_file] for both Header and Source) rather than adding new string resources — the
+ * `.h`/`.cpp` [suffix] is what tells Header and Source apart on the chip, since both would otherwise read
+ * as the same "File" label.
+ */
+private enum class SourceKind(val label: StringResource, val template: UiNewFileTemplate, val suffix: String = "") {
     JClass(Res.string.newfile_kind_class, UiNewFileTemplate.JavaClass),
     JInterface(Res.string.newfile_kind_interface, UiNewFileTemplate.JavaInterface),
     JEnum(Res.string.newfile_kind_enum, UiNewFileTemplate.JavaEnum),
@@ -257,31 +266,41 @@ private enum class SourceKind(val label: StringResource, val template: UiNewFile
     KObject(Res.string.newfile_kind_object, UiNewFileTemplate.KotlinObject),
     AInterface(Res.string.newfile_kind_interface, UiNewFileTemplate.AidlInterface),
     AParcelable(Res.string.newfile_kind_parcelable, UiNewFileTemplate.AidlParcelable),
+    CppClass(Res.string.newfile_kind_class, UiNewFileTemplate.CppClass, " (.h)"),
+    CppHeader(Res.string.newfile_kind_file, UiNewFileTemplate.CppHeader, " (.h)"),
+    CppSource(Res.string.newfile_kind_file, UiNewFileTemplate.CppSource, " (.cpp)"),
 }
 
 private fun newSourceTitle(lang: NewSourceLang): StringResource = when (lang) {
     NewSourceLang.Java -> Res.string.newfile_new_java_class
     NewSourceLang.Kotlin -> Res.string.newfile_new_kotlin_file
     NewSourceLang.Aidl -> Res.string.newfile_new_aidl_file
+    // No dedicated "New C/C++ File" string yet; the generic title reads fine here (the kind chips below
+    // — Class/Header/Source — already say what's being created).
+    NewSourceLang.Cpp -> Res.string.newfile_title
 }
 
 private fun newSourceHint(lang: NewSourceLang): StringResource = when (lang) {
     NewSourceLang.Java -> Res.string.newfile_source_java_hint
     NewSourceLang.Kotlin -> Res.string.newfile_source_kotlin_hint
     NewSourceLang.Aidl -> Res.string.newfile_source_aidl_hint
+    NewSourceLang.Cpp -> Res.string.newfile_file_name_hint
 }
 
 private fun kindsFor(lang: NewSourceLang): List<SourceKind> = when (lang) {
     NewSourceLang.Java -> listOf(SourceKind.JClass, SourceKind.JInterface, SourceKind.JEnum, SourceKind.JAbstract, SourceKind.JAnnotation)
     NewSourceLang.Kotlin -> listOf(SourceKind.KClass, SourceKind.KFile, SourceKind.KInterface, SourceKind.KData, SourceKind.KEnum, SourceKind.KObject)
     NewSourceLang.Aidl -> listOf(SourceKind.AInterface, SourceKind.AParcelable)
+    NewSourceLang.Cpp -> listOf(SourceKind.CppClass, SourceKind.CppHeader, SourceKind.CppSource)
 }
 
 /**
- * The typed New-Java-class / New-Kotlin-file dialog: a kind selector (Class/Interface/Enum/… for Java;
- * Class/File/Interface/Data class/… for Kotlin) + a bare type-name field (no extension). The backend
- * scaffolds the stub with the package resolved from the target directory and picks the `.java`/`.kt`
- * extension. Hands `(dir, name, template)` to [onCreate].
+ * The typed New-Java-class / New-Kotlin-file / New-C++-file dialog: a kind selector (Class/Interface/Enum/…
+ * for Java; Class/File/Interface/Data class/… for Kotlin; Class/Header/Source for C++) + a bare type-name
+ * field (no extension). The backend scaffolds the stub — with the package resolved from the target
+ * directory for Java/Kotlin/AIDL, or a `#pragma once` guard for C++, which has no package system — and
+ * picks the extension (`.java`/`.kt`/`.aidl`/`.h`/`.cpp`; see `FileBackend.createSourceFile`). Hands
+ * `(dir, name, template)` to [onCreate].
  */
 @Composable
 fun NewSourceFileDialog(
@@ -342,7 +361,7 @@ private fun NewSourcePanel(
 
         FieldLabel(stringResource(Res.string.newfile_kind))
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            kinds.forEach { k -> SelectChip(stringResource(k.label), selected = k == kind, onClick = { kind = k }) }
+            kinds.forEach { k -> SelectChip(stringResource(k.label) + k.suffix, selected = k == kind, onClick = { kind = k }) }
         }
         Spacer12()
 
