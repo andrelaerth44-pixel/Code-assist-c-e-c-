@@ -362,7 +362,7 @@ internal class FileBackend(private val ctx: BackendContext) : FileService {
     }
 
     /** Starter content for a new file, chosen by extension: a class stub (with the resolved package) for
-     *  `.java`/`.kt`, a root element for `.xml`, otherwise empty. */
+     *  `.java`/`.kt`, a root element for `.xml`, a starter comment for `.c`/`.cpp`/`.h`, otherwise empty. */
     private fun scaffoldContent(dir: Path, fileName: String): String {
         val base = fileName.substringBeforeLast('.')
         val ext = fileName.substringAfterLast('.', "").lowercase()
@@ -379,6 +379,9 @@ internal class FileBackend(private val ctx: BackendContext) : FileService {
                 (if (pkg.isEmpty()) "" else "package $pkg\n\n") + "class $typeName {\n}\n"
             }
             "xml" -> "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<root>\n\n</root>\n"
+            // A plain C/C++ header created through "New ▸ File" (extension typed by hand, not the typed
+            // C/C++ dialog below) still gets an include guard rather than nothing.
+            "h", "hpp", "hh", "hxx" -> if (typeName != null) cppHeaderGuard(typeName) { "" } else ""
             else -> ""
         }
     }
@@ -389,6 +392,11 @@ internal class FileBackend(private val ctx: BackendContext) : FileService {
         val extension = when {
             template.name.startsWith("Kotlin") -> "kt"
             template.name.startsWith("Aidl") -> "aidl"
+            // CppHeader and CppClass both scaffold a header (a small/header-only class is idiomatic C++, and
+            // this dialog — like the Java/Kotlin ones — creates exactly one file); CppSource is the .cpp half
+            // a user pairs with a header of their own (or none, for a free-function file).
+            template == UiNewFileTemplate.CppHeader || template == UiNewFileTemplate.CppClass -> "h"
+            template == UiNewFileTemplate.CppSource -> "cpp"
             else -> "java"
         }
         val dir = Paths.get(dirPath)
@@ -397,7 +405,12 @@ internal class FileBackend(private val ctx: BackendContext) : FileService {
         return writeNewFile(dirPath, "$typeName.$extension") { it.writeText(content) }
     }
 
-    /** The body for a typed [UiNewFileTemplate], with the resolved [pkg] declaration prepended. */
+    /** `#pragma once` + [body] between blank lines — the shared shape of every generated C/C++ header. */
+    private fun cppHeaderGuard(name: String, body: () -> String): String =
+        "#pragma once\n\n${body()}"
+
+    /** The body for a typed [UiNewFileTemplate], with the resolved [pkg] declaration prepended (Java/Kotlin/
+     *  AIDL) or a `#pragma once` guard (C/C++, which has no package system of its own). */
     private fun sourceTemplate(template: UiNewFileTemplate, name: String, pkg: String): String {
         val javaPkg = if (pkg.isEmpty()) "" else "package $pkg;\n\n"
         val ktPkg = if (pkg.isEmpty()) "" else "package $pkg\n\n"
@@ -417,6 +430,17 @@ internal class FileBackend(private val ctx: BackendContext) : FileService {
             // A bare `parcelable Foo;` declares that a hand-written Parcelable exists; that (not a structured
             // parcelable) is what an app almost always wants, so it is what the template scaffolds.
             UiNewFileTemplate.AidlParcelable -> javaPkg + "parcelable $name;\n"
+            // A header-only class: declaration + inline empty bodies, the common shape for a small engine
+            // type (a value class, a small interface) that doesn't need a separate .cpp yet. The NdkBuildPlugin
+            // compiles whatever .cpp files reference this header; nothing here needs registering separately.
+            UiNewFileTemplate.CppClass -> cppHeaderGuard(name) { "class $name {\npublic:\n    $name() = default;\n};\n" }
+            // A bare header: just the guard, for a file that will hold free functions/constants/macros rather
+            // than a class.
+            UiNewFileTemplate.CppHeader -> cppHeaderGuard(name) { "" }
+            // A .cpp implementation file. Deliberately does NOT #include "$name.h": this dialog creates one
+            // file, and guessing a matching header's existence/casing would be wrong as often as right. A user
+            // pairing this with a header adds that #include themselves once both files exist.
+            UiNewFileTemplate.CppSource -> ""
         }
     }
 
