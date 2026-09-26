@@ -1290,12 +1290,20 @@ enum class UiSourceRootRole { Source, Resource, AndroidRes, Assets, Aidl, JniLib
 
 /**
  * A typed source-file template the file-tree "New" submenu can scaffold. The prefix names the language
- * (Java → `.java`, Kotlin → `.kt`); the backend prepends the package resolved from the target directory.
+ * (Java → `.java`, Kotlin → `.kt`, Cpp → `.h`/`.cpp` — see [FileBackend.createSourceFile]); the backend
+ * prepends the package resolved from the target directory (Java/Kotlin/AIDL only — C/C++ has no package
+ * system, so those three scaffold a `#pragma once` guard instead; see `FileBackend.sourceTemplate`).
  */
 enum class UiNewFileTemplate {
     JavaClass, JavaInterface, JavaEnum, JavaAbstractClass, JavaAnnotation,
     KotlinFile, KotlinClass, KotlinInterface, KotlinDataClass, KotlinEnum, KotlinObject,
     AidlInterface, AidlParcelable,
+    /** A header-only class (`.h`, declaration + inline bodies) — the common shape for a small engine type. */
+    CppClass,
+    /** A bare `#pragma once` header (`.h`) with no class — for free functions/constants/macros. */
+    CppHeader,
+    /** An empty `.cpp` implementation file, meant to be paired with a header (this dialog's own or another's). */
+    CppSource,
 }
 
 /** Structural role of a tree node. The *icon* is chosen separately via [TreeNode.iconId]. */
