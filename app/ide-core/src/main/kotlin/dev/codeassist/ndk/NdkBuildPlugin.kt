@@ -20,6 +20,7 @@ import dev.ide.platform.log.Logger
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.util.stream.Collectors
 import kotlin.io.path.extension
 
 /**
@@ -92,14 +93,20 @@ internal class NdkCompileTask(
 
     private val moduleDir: Path get() = Paths.get(module.dir.path)
 
-    /** Every C and C++ file under the facet's source directories. */
+    /**
+     * Every C and C++ file under the facet's source directories.
+     *
+     * Collected with `Collectors.toList()` rather than `Stream.toList()`: the latter is JDK 16 / API 34, and
+     * this runs on ART devices from API 26, where core-library desugaring does not backport it and the call
+     * would throw NoSuchMethodError the first time a native build ran.
+     */
     private fun sources(): List<Path> = facet.sourceDirs
         .map { moduleDir.resolve(it) }
         .filter { Files.isDirectory(it) }
         .flatMap { dir ->
             Files.walk(dir).use { walk ->
                 walk.filter { Files.isRegularFile(it) && it.extension.lowercase() in SOURCE_EXTENSIONS }
-                    .toList()
+                    .collect(Collectors.toList())
             }
         }
         .sorted()
