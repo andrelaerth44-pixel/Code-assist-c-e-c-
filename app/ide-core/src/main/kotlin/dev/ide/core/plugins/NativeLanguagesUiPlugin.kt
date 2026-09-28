@@ -9,11 +9,11 @@ import dev.ide.ui.ext.UiPlugin
  * Editor-side text profiles for C, C++ and C#: keyword coloring, line/block comments, and (for C/C++) the
  * `#include`/`#define` preprocessor-directive coloring [SyntaxFamily.C_FAMILY] supports natively via
  * [EditorLanguageProfile.directivePrefix]. This is the cheap per-line layer the profile is documented as --
- * no parser, no resolution, no completion, no compiler. [NativeLanguagesPlugin] claims the file types
- * ([dev.ide.lang.FILE_TYPE_EP]) this profile paints.
+ * no parser, no resolution: it is what colors the text while the user types, before any analysis lands.
  *
- * Real compilation -- an on-device NDK/Clang toolchain for C/C++, and a runtime for C# -- is separate, larger
- * follow-up work; see NATIVE_LANG_SUPPORT.md.
+ * The suffix sets here MUST match the file-type mappings `dev.codeassist.ndk.NdkPlugin` registers for C and
+ * C++ (`.c` is C; everything else, `.h` included, is C++ -- see NdkPlugin.CPP_SUFFIXES). C# has no compiler
+ * and no other owner, so [NativeLanguagesPlugin] still claims `.cs`.
  */
 object NativeLanguagesUiPlugin : UiPlugin {
     override val id = "native-languages"
@@ -22,7 +22,7 @@ object NativeLanguagesUiPlugin : UiPlugin {
         scope.editorLanguage(
             EditorLanguageProfile(
                 id = "c",
-                suffixes = listOf(".c", ".h"),
+                suffixes = listOf(".c"),
                 syntax = SyntaxFamily.C_FAMILY,
                 keywords = C_KEYWORDS,
                 lineComment = "//",
@@ -34,7 +34,7 @@ object NativeLanguagesUiPlugin : UiPlugin {
         scope.editorLanguage(
             EditorLanguageProfile(
                 id = "cpp",
-                suffixes = listOf(".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"),
+                suffixes = listOf(".cpp", ".cc", ".cxx", ".c++", ".h", ".hpp", ".hh", ".hxx", ".inl"),
                 syntax = SyntaxFamily.C_FAMILY,
                 keywords = C_KEYWORDS + CPP_ONLY_KEYWORDS,
                 lineComment = "//",
@@ -85,30 +85,23 @@ object NativeLanguagesUiPlugin : UiPlugin {
 }
 
 /**
- * C/C++/C# as their own file types (so they are not misparsed as Java) plus the coloring/comment profile in
- * [NativeLanguagesUiPlugin]. No [dev.ide.lang.LanguageBackend] yet -- no parser, completion, or diagnostics --
- * and no compiler wired in. Non-essential, so it can be turned off from Settings -> Plugins like any other
- * language, at which point these files fall back to [dev.ide.lang.LanguageId] `"text"` the same as any other
- * unclaimed suffix.
+ * The C# file type (`.cs`), plus the host of [NativeLanguagesUiPlugin]'s coloring for all three languages.
+ *
+ * C and C++ file types are NOT registered here: `NdkPlugin` (the real compiler, `id = "ndk-native"`) owns
+ * `.c` and the C++ suffixes, and two plugins claiming the same suffix would fight over which language id a
+ * file gets. C# has no compiler and no other owner, so it stays here. Non-essential, so it can be turned off
+ * from Settings -> Plugins like any other language.
  */
 internal class NativeLanguagesPlugin : dev.ide.plugin.Plugin {
     override val manifest = dev.ide.plugin.PluginManifest(
         id = "native-languages",
-        name = "C / C++ / C#",
-        description = "Recognizes .c/.h/.cpp/.cs files and colors them with C-family syntax highlighting. " +
-            "Editor recognition only -- no parser, no completion, no compiler.",
+        name = "C / C++ / C# (editor)",
+        description = "C-family syntax coloring for C, C++ and C#, and the C# file type. The C/C++ compiler " +
+            "itself is the separate 'C / C++ (NDK)' plugin.",
         dependsOn = listOf("jdt-language"),
     )
 
     override fun register(reg: dev.ide.plugin.PluginRegistration) {
-        reg.register(dev.ide.lang.FILE_TYPE_EP, dev.ide.lang.FileTypeMapping(listOf(".c", ".h"), dev.ide.lang.LanguageId("c")))
-        reg.register(
-            dev.ide.lang.FILE_TYPE_EP,
-            dev.ide.lang.FileTypeMapping(
-                listOf(".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"),
-                dev.ide.lang.LanguageId("cpp"),
-            ),
-        )
         reg.register(dev.ide.lang.FILE_TYPE_EP, dev.ide.lang.FileTypeMapping(listOf(".cs"), dev.ide.lang.LanguageId("csharp")))
     }
 }
